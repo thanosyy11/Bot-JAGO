@@ -1,0 +1,5 @@
+.env
+.emyu/
+siliwangi_bot.db
+siliwangi_error.log
+__pycache__/
