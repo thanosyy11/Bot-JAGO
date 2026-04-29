@@ -33,8 +33,8 @@ router = Router()
 zona_waktu = pytz.timezone('Asia/Jakarta')
 scheduler = AsyncIOScheduler(timezone=zona_waktu)
 
-# router.message.filter(F.from_user.id == ADMIN_ID)
-# router.callback_query.filter(F.from_user.id == ADMIN_ID)
+router.message.filter(F.from_user.id == ADMIN_ID)
+router.callback_query.filter(F.from_user.id == ADMIN_ID)
 
 class AkunState(StatesGroup):
     waiting_for_username = State()
@@ -50,23 +50,23 @@ mesin_siaga = {}
 # ==========================================
 
 async def eksekusi_dengan_jeda(engine, delay, username):
-    """Fungsi sniper: Menunggu aba-aba (delay) sebelum menembak"""
+    """Menunggu sebelum War"""
     if delay > 0:
         await asyncio.sleep(delay)
     
-    logger.info(f"🔫 Menembak untuk akun: {username} (Delay: {delay}s)")
+    logger.info(f"🔫 akun: {username} (Delay: {delay}s)")
     hasil = await engine.execute_order()
     return username, hasil
 
 async def job_pemanasan():
-    logger.info("Mengecek jadwal pemanasan (07:55)...")
+    logger.info("Warm Up (07:55)...")
     orders = get_all_pending_orders_multi(str(ADMIN_ID))
     
     if not orders:
-        logger.info("🏖️ [MODE CUTI] Tidak ada draf pesanan. Bot tidur kembali.")
+        logger.info("[Libur] Tidak ada draf pesanan.")
         return
 
-    await bot.send_message(ADMIN_ID, f"⚙️ **[AUTO-SYSTEM] 07:55 WIB**\nTerdeteksi {len(orders)} draf pesanan! Memulai pemanasan massal...")
+    await bot.send_message(ADMIN_ID, f"⚙️ Terdeteksi {len(orders)} draf pesanan! Memulai pemanasan massal...")
     
     # Menyiapkan pasukan (mesin) sebanyak jumlah draf akun
     mesin_siaga[ADMIN_ID] = {}
@@ -82,19 +82,19 @@ async def job_pemanasan():
             await engine.close()
 
     if berhasil_login > 0:
-        await bot.send_message(ADMIN_ID, f"✅ **{berhasil_login} Akun Standby!**\nSistem bersiap eksekusi paralel pada pukul 08:00 tepat.")
+        await bot.send_message(ADMIN_ID, f"✅ *{berhasil_login} Akun Standby!*")
     else:
-        await bot.send_message(ADMIN_ID, "❌ **[GAGAL TOTAL]** Tidak ada akun yang berhasil login.")
+        await bot.send_message(ADMIN_ID, "❌ **[GAGAL]** Tidak ada akun yang berhasil login.")
 
 async def job_eksekusi():
-    logger.info("Mengecek jadwal eksekusi paralel (08:00)...")
+    logger.info("Mengecek jadwal (08:00)...")
     pasukan = mesin_siaga.get(ADMIN_ID, {})
     
     if not pasukan:
         logger.info("🏖️ [MODE CUTI/GAGAL] Eksekusi dibatalkan.")
         return
 
-    logger.info(f"🚀 MEMULAI SERANGAN PARALEL UNTUK {len(pasukan)} AKUN!")
+    logger.info(f"🚀 MEMULAI WAR {len(pasukan)} AKUN!")
     
     # Mengumpulkan tugas tembakan dengan strategi Micro-Delay (0.3 detik antar akun)
     tasks = []
@@ -107,7 +107,7 @@ async def job_eksekusi():
     hasil_perang = await asyncio.gather(*tasks)
     
     # Membersihkan memori mesin & Rekap Laporan
-    laporan = "📊 **REKAP HASIL WAR 08:00 WIB:**\n\n"
+    laporan = "📊 **HASIL WAR 08:00 WIB:**\n\n"
     for target_username, is_success in hasil_perang:
         status = "✅ BERHASIL" if is_success else "❌ GAGAL/HABIS"
         laporan += f"👤 `{target_username}`: {status}\n"
@@ -119,7 +119,7 @@ async def job_eksekusi():
     mesin_siaga.pop(ADMIN_ID, None)
     
     await bot.send_message(ADMIN_ID, laporan, parse_mode="Markdown")
-    logger.info("Operasi Serangan Paralel Selesai.")
+    logger.info("War Selesai.")
 
 scheduler.add_job(job_pemanasan, 'cron', hour=7, minute=55, second=0)
 scheduler.add_job(job_eksekusi, 'cron', hour=8, minute=0, second=0)
@@ -132,19 +132,17 @@ def get_main_menu_keyboard():
         [InlineKeyboardButton(text="📦 Input Pesanan", callback_data="menu_order")],
         [InlineKeyboardButton(text="👥 Kelola Multi-Akun", callback_data="menu_akun")],
         [InlineKeyboardButton(text="📝 Cek Draf & Kelola", callback_data="menu_kelola")],
-        [InlineKeyboardButton(text="📊 Status Engine", callback_data="menu_status")]
+        [InlineKeyboardButton(text="📊 Status", callback_data="menu_status")]
     ])
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
-    print(f"🚨 SENSOR: Ada yang ketik /start! ID dia adalah: {message.from_user.id}")
     await state.clear()
     current_user = get_current_user(str(message.from_user.id))
     status_akun = f"{current_user}" if current_user else "Belum Ada Akun"
     
     teks = (
-        f"🤖 **Bot JAGO v2.0 - Multi Account**\n\n"
-        f"👑 **Panel Kendali Utama**\n"
+        f"🤖 **Bot JAGO**\n\n"
         f"🟢 **Akun Aktif:** `{status_akun}`\n\n"
         f"*(Input pesanan akan otomatis masuk ke Akun Aktif)*"
     )
@@ -167,7 +165,7 @@ async def cb_menu_akun(callback: CallbackQuery):
     
     teks = (
         "👥 **Manajemen Multi-Akun**\n\n"
-        "Klik nama akun di bawah ini untuk **menjadikannya Akun Aktif** (Pindah Kendali), "
+        "Klik nama akun di bawah ini untuk **menjadikannya Akun Aktif**, "
         "atau klik Tambah Akun Baru."
     )
     await callback.message.edit_text(teks, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard), parse_mode="Markdown")
@@ -182,7 +180,7 @@ async def cb_setacc(callback: CallbackQuery):
 
 @router.callback_query(F.data == "add_new_acc")
 async def cb_add_new_acc(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("➕ **Tambah Akun Siliwangi**\nSilakan ketik **Username/Email** toko:", parse_mode="Markdown")
+    await callback.message.edit_text("➕ **Tambah Akun**\nMasukan **Username/Email**:", parse_mode="Markdown")
     await state.set_state(AkunState.waiting_for_username)
 
 # [PERBAIKAN BUG] Pelindung Anti-Salah Ketik (Bug /daftar)
@@ -193,7 +191,7 @@ async def process_username(message: Message, state: FSMContext):
         return
         
     await state.update_data(username=message.text)
-    await message.answer("Sekarang ketik **Password** kamu:")
+    await message.answer("Masukan **Password**:")
     await state.set_state(AkunState.waiting_for_password)
 
 @router.message(AkunState.waiting_for_password)
@@ -207,7 +205,7 @@ async def process_password(message: Message, state: FSMContext):
     await state.clear()
     
     btn = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Kembali ke Dasbor", callback_data="kembali_ke_menu")]])
-    await message.answer(f"✅ **Akun Berhasil Ditambahkan & Diaktifkan!**\n(`{data['username']}`)", reply_markup=btn, parse_mode="Markdown")
+    await message.answer(f"✅ **Akun Berhasil Ditambahkan!**\n(`{data['username']}`)", reply_markup=btn, parse_mode="Markdown")
 
 @router.callback_query(F.data == "menu_status")
 async def cb_menu_status(callback: CallbackQuery):
@@ -216,9 +214,9 @@ async def cb_menu_status(callback: CallbackQuery):
     # Menghitung total orderan dari semua akun
     orders = get_all_pending_orders_multi(str(callback.from_user.id))
     total_draf = len(orders)
-    status_order = f"{total_draf} PENDING ⏳" if total_draf > 0 else "KOSONG (Mode Cuti Aktif 🏖️)"
+    status_order = f"{total_draf} PENDING ⏳" if total_draf > 0 else "KOSONG (Liburr 🏖️)"
     
-    teks = (f"📊 **STATUS ENGINE**\n\n🕒 **Waktu:** {now}\n⚙️ **Gatekeeper:** Aktif ✅\n🛒 **Total Draf (Semua Akun):** {status_order}\n\n*(Sesi Login: 07:55 | Eksekusi: 08:00)*")
+    teks = (f"📊 **STATUS**\n\n🕒 **Waktu:** {now}\n\n🛒 **Total Draf (Semua Akun):** {status_order}\n")
     btn = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Kembali", callback_data="kembali_ke_menu")]])
     await callback.message.edit_text(teks, reply_markup=btn, parse_mode="Markdown")
 
@@ -237,7 +235,7 @@ async def cb_menu_kelola(callback: CallbackQuery):
     keranjang = json.loads(payload_json)
     teks_keranjang = "\n".join([f"- {item['qty']}x {item['nama']}" for item in keranjang])
     
-    teks = (f"📝 **DRAF AKUN: {current_user}**\n\n{teks_keranjang}\n\n📦 **Total MAXI:** {total_maxi} pcs")
+    teks = (f"📝 **DRAF AKUN: {current_user}**\n\n{teks_keranjang}\n\n **Total MAXI:** {total_maxi} pcs")
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✏️ Edit Order", callback_data="edit_order")],
         [InlineKeyboardButton(text="🗑️ Hapus Order", callback_data="hapus_order")],
@@ -281,8 +279,8 @@ async def cb_menu_order(callback: CallbackQuery, state: FSMContext):
         return
 
     template = (
-        f"📦 **Input Draf untuk Akun: {current_user}**\n\n"
-        "Salin dan edit nama & kuantitas semau kamu:\n\n"
+        f" **Order untuk Akun: {current_user}**\n\n"
+        "Salin dan edit kuantitas & nama semau kamu:\n\n"
         "- 50x MAXI Belgian Chocolate\n"
         "- 50x MAXI Black Forest\n"
         "- 15x MAXI Cokelat Dubai Pistachio\n"
@@ -299,7 +297,7 @@ async def cb_menu_order(callback: CallbackQuery, state: FSMContext):
         "- 3x MAXI Original Lapis\n"
         "- 0x DC Belgian Chocolate\n"
         "- 0x DC Black Forest\n"
-        "- 0x Plastik Bolu Klasik HD Isi 3 Box\n\n"
+        "- 50x Plastik Bolu Klasik HD Isi 3 Box\n\n"
         "*(Catatan: Hapus baris yang tidak perlu, atau cukup jadikan 0x)*"
     )
     await callback.message.edit_text(template, parse_mode="Markdown")
@@ -339,7 +337,7 @@ async def process_template(message: Message, state: FSMContext):
     total_kue = sum(item['qty'] for item in keranjang if item['kategori'] in ['MAXI', 'DC'])
     if total_kue < 50:
         await message.answer(
-            f"⚠️ **PERINGATAN MINIMAL ORDER** ⚠️\nTotal kue (MAXI + DC): **{total_kue} box**.\nWeb Siliwangi mewajibkan minimal **50 box**.",
+            f"⚠️ **PERINGATAN MINIMAL ORDER**\nTotal kue (MAXI + DC): **{total_kue} box**.\nWeb Siliwangi mewajibkan minimal **50 box**.",
             parse_mode="Markdown"
         )
         return
@@ -348,7 +346,7 @@ async def process_template(message: Message, state: FSMContext):
     if sisa != 0:
         kurang, tambah = sisa, 12 - sisa
         await message.answer(
-            f"⚠️ **PERINGATAN KELIPATAN 12** ⚠️\nTotal MAXI kamu: **{total_maxi} pcs**.\n\n⬇️ Kurangi **{kurang}** agar menjadi **{total_maxi - kurang}**.\n⬆️ Atau Tambah **{tambah}** agar menjadi **{total_maxi + tambah}**.",
+            f"⚠️ **PERINGATAN KELIPATAN 12**\nTotal MAXI kamu: **{total_maxi} pcs**.\n\n⬇️ Kurangi **{kurang}** agar menjadi **{total_maxi - kurang}**.\n⬆️ Atau Tambah **{tambah}** agar menjadi **{total_maxi + tambah}**.",
             parse_mode="Markdown"
         )
         return 
@@ -371,8 +369,7 @@ async def cb_kembali(callback: CallbackQuery, state: FSMContext):
     status_akun = f"{current_user}" if current_user else "Belum Ada Akun"
     
     teks = (
-        f"🤖 **Bot JAGO v2.0 - Multi Account**\n\n"
-        f"👑 **Panel Kendali Utama**\n"
+        f"🤖 **Bot JAGO**\n\n"
         f"🟢 **Akun Aktif:** `{status_akun}`\n\n"
         f"*(Input pesanan akan otomatis masuk ke Akun Aktif)*"
     )
