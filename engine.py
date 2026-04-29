@@ -16,9 +16,10 @@ logger = logging.getLogger(__name__)
 DB_NAME = "siliwangi_bot.db"
 
 class SiliwangiEngine:
-    def __init__(self, telegram_id):
+    # [PERUBAHAN V2]: Mesin sekarang wajib menerima 'username' saat dipanggil
+    def __init__(self, telegram_id, username):
         self.telegram_id = telegram_id
-        self.username = None
+        self.username = username
         self.password = None
         self.checkout_nonce = None
         self.order_id = None
@@ -30,6 +31,7 @@ class SiliwangiEngine:
             "Referer": "https://siliwangibolukukus.com/"
         }
         
+        # Setiap akun akan memiliki "Browser/Client" nya masing-masing secara terisolasi
         self.client = httpx.AsyncClient(headers=self.headers, follow_redirects=True, timeout=15.0)
 
     # ==========================================
@@ -57,20 +59,21 @@ class SiliwangiEngine:
                 return None
         return None
 
+    # [PERUBAHAN V2]: Mengambil password khusus untuk username ini saja
     def _get_credentials(self):
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
-        cursor.execute("SELECT username, password FROM users WHERE telegram_id = ?", (self.telegram_id,))
+        cursor.execute("SELECT password FROM users WHERE telegram_id = ? AND username = ?", (self.telegram_id, self.username))
         row = cursor.fetchone()
         conn.close()
         if row:
-            self.username, self.password = row
+            self.password = row[0]
             return True
         return False
 
     async def login(self):
         if not self._get_credentials():
-            logger.error("Kredensial login tidak ditemukan.")
+            logger.error(f"Kredensial login tidak ditemukan untuk: {self.username}")
             return False
 
         url_account = "https://siliwangibolukukus.com/my-account/"
@@ -82,7 +85,7 @@ class SiliwangiEngine:
             nonce_field = soup.find('input', {'name': 'woocommerce-login-nonce'})
             
             if not nonce_field:
-                logger.error("Gagal mendapatkan Login Nonce.")
+                logger.error(f"Gagal mendapatkan Login Nonce untuk: {self.username}")
                 return False
                 
             payload = {
@@ -95,21 +98,17 @@ class SiliwangiEngine:
 
             login_res = await self._safe_request('POST', url_account, data=payload)
             if login_res and ("Keluar" in login_res.text or "Logout" in login_res.text):
-                logger.info(f"Login sukses untuk user: {self.username}")
+                logger.info(f"✅ Login sukses untuk user: {self.username}")
                 return True
             else:
-                logger.warning(f"Login gagal untuk user: {self.username}")
+                logger.warning(f"❌ Login gagal untuk user: {self.username}")
                 return False
         except Exception as e:
-            logger.error(f"Error saat login: {str(e)}", exc_info=True)
+            logger.error(f"Error saat login {self.username}: {str(e)}", exc_info=True)
             return False
 
-    # ==========================================
-    # FITUR BARU: AUTO-CLEAR CART (TUKANG SAPU)
-    # ==========================================
     async def clear_cart(self):
-        """Memastikan keranjang kosong 100% sebelum perang dimulai."""
-        logger.info("🧹 Mengecek dan membersihkan keranjang hantu...")
+        logger.info(f"🧹 [{self.username}] Mengecek dan membersihkan keranjang hantu...")
         try:
             res = await self._safe_request('GET', "https://siliwangibolukukus.com/cart/")
             if not res: return
@@ -118,18 +117,17 @@ class SiliwangiEngine:
             remove_links = soup.find_all('a', class_='remove')
             
             if not remove_links:
-                logger.info("✨ Keranjang sudah bersih. Aman untuk mulai.")
+                logger.info(f"✨ [{self.username}] Keranjang sudah bersih.")
                 return
 
             for link in remove_links:
                 href = link.get('href')
                 if href:
-                    # Mengirim request ke link "x" (remove)
                     await self._safe_request('GET', href)
             
-            logger.info(f"🗑️ Berhasil menghapus {len(remove_links)} item sisa dari keranjang!")
+            logger.info(f"🗑️ [{self.username}] Menghapus {len(remove_links)} item sisa.")
         except Exception as e:
-            logger.error(f"Gagal membersihkan keranjang: {str(e)}")
+            logger.error(f"Gagal membersihkan keranjang {self.username}: {str(e)}")
 
     async def get_checkout_nonce(self):
         try:
@@ -143,7 +141,7 @@ class SiliwangiEngine:
                 return True
             return False
         except Exception as e:
-            logger.error(f"Gagal mengambil Checkout Nonce: {str(e)}")
+            logger.error(f"Gagal mengambil Checkout Nonce {self.username}: {str(e)}")
             return False
 
     async def _add_to_cart(self, prod_id, qty):
@@ -157,9 +155,6 @@ class SiliwangiEngine:
         except Exception:
             return False
 
-    # ==========================================
-    # FITUR BARU: SUBSTITUSI LINTAS TIER
-    # ==========================================
     async def add_to_cart_with_fallback(self, item):
         target_id = item['id']
         qty = item['qty']
@@ -167,20 +162,16 @@ class SiliwangiEngine:
         target_tier = item.get('tier', 0)
         kategori = item.get('kategori', '')
         
-        # 1. Tembakan Pertama (Sesuai Draf)
         if await self._add_to_cart(target_id, qty): 
-            logger.info(f"✅ Masuk: {qty}x {nama}")
+            logger.info(f"✅ [{self.username}] Masuk: {qty}x {nama}")
             return True
             
         if target_tier == 0:
-            logger.error(f"❌ {nama} HABIS (Tier 0). Dilewati.")
+            logger.error(f"❌ [{self.username}] {nama} HABIS (Tier 0). Dilewati.")
             return False
             
-        logger.warning(f"⚠️ {nama} HABIS! Berburu varian pengganti...")
+        logger.warning(f"⚠️ [{self.username}] {nama} HABIS! Berburu varian pengganti...")
         
-        # 2. Ambil semua alternatif di kategori yang sama.
-        # Trik SQL: ORDER BY ABS(tier - target_tier)
-        # Ini akan mencari Tier 1 dulu, kalau habis lompat ke Tier 2, lalu Tier 3!
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
         cursor.execute('''
@@ -192,20 +183,20 @@ class SiliwangiEngine:
         alternatives = cursor.fetchall()
         conn.close()
         
-        # 3. Eksekusi tembakan pengganti lintas Tier
         for alt_id, alt_nama, alt_tier in alternatives:
-            logger.info(f"   🔄 Mencoba: {alt_nama} (Tier {alt_tier})...")
+            logger.info(f"   🔄 [{self.username}] Mencoba: {alt_nama} (Tier {alt_tier})...")
             if await self._add_to_cart(alt_id, qty):
-                logger.info(f"   🎯 BERHASIL disubstitusi dengan: {alt_nama}!")
+                logger.info(f"   🎯 [{self.username}] BERHASIL disubstitusi dengan: {alt_nama}!")
                 return True
                 
-        logger.error(f"💀 GAGAL TOTAL! Seluruh varian {kategori} LUDES.")
+        logger.error(f"💀 [{self.username}] GAGAL TOTAL! Seluruh varian {kategori} LUDES.")
         return False
 
+    # [PERUBAHAN V2]: Hanya mengambil draf milik username ini saja
     async def execute_order(self):
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
-        cursor.execute("SELECT id, payload_json FROM draft_orders WHERE telegram_id=? AND status='PENDING' ORDER BY id DESC LIMIT 1", (self.telegram_id,))
+        cursor.execute("SELECT id, payload_json FROM draft_orders WHERE telegram_id=? AND username=? AND status='PENDING' ORDER BY id DESC LIMIT 1", (self.telegram_id, self.username))
         row = cursor.fetchone()
         conn.close()
         
@@ -214,7 +205,6 @@ class SiliwangiEngine:
         self.order_id, payload_json = row
         keranjang = json.loads(payload_json)
         
-        # SAPU BERSIH KERANJANG LAMA DULU
         await self.clear_cart()
         
         for item in keranjang:
@@ -255,39 +245,34 @@ class SiliwangiEngine:
             final_res = await self._safe_request('POST', checkout_url, data=payload)
             if not final_res: return False
             
-            # --- PERBAIKAN LOGIKA DETEKSI SUKSES ---
-            # Cek 1: Apakah kita di-redirect ke halaman "Order Received/Order Complete"?
             if "order-received" in str(final_res.url) or "Pesanan" in final_res.text or "Order Complete" in final_res.text:
-                logger.info(f"Checkout BERHASIL (Terdeteksi via Redirect HTML). Order ID DB: {self.order_id}")
-                conn = sqlite3.connect(DB_NAME)
-                cursor = conn.cursor()
-                cursor.execute("UPDATE draft_orders SET status='SUCCESS' WHERE id=?", (self.order_id,))
-                conn.commit()
-                conn.close()
+                logger.info(f"🎉 Checkout BERHASIL [{self.username}]. Order ID DB: {self.order_id}")
+                self._mark_success()
                 return True
 
-            # Cek 2: Jika server membalas dengan format JSON standar
             try:
                 result = final_res.json()
                 if result.get('result') == 'success':
-                    logger.info(f"Checkout BERHASIL (Terdeteksi via JSON). Order ID DB: {self.order_id}")
-                    conn = sqlite3.connect(DB_NAME)
-                    cursor = conn.cursor()
-                    cursor.execute("UPDATE draft_orders SET status='SUCCESS' WHERE id=?", (self.order_id,))
-                    conn.commit()
-                    conn.close()
+                    logger.info(f"🎉 Checkout BERHASIL [{self.username}]. Order ID DB: {self.order_id}")
+                    self._mark_success()
                     return True
                 else:
-                    logger.error(f"Checkout DITOLAK: {final_res.text}")
+                    logger.error(f"Checkout DITOLAK [{self.username}]: {final_res.text}")
                     return False
             except Exception as e:
-                # Jika bukan JSON dan bukan halaman sukses, baru kita anggap gagal beneran
-                logger.error(f"Checkout Gagal/Server Error. Respons Web: {final_res.text[:150]}...", exc_info=True)
+                logger.error(f"Checkout Gagal [{self.username}]. Respons: {final_res.text[:150]}...", exc_info=True)
                 return False
 
         except Exception as e:
-            logger.error(f"Gagal checkout: {str(e)}", exc_info=True)
+            logger.error(f"Gagal checkout [{self.username}]: {str(e)}", exc_info=True)
             return False
+
+    def _mark_success(self):
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute("UPDATE draft_orders SET status='SUCCESS' WHERE id=?", (self.order_id,))
+        conn.commit()
+        conn.close()
 
     async def close(self):
         await self.client.aclose()

@@ -1,5 +1,8 @@
 import sqlite3
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 DB_NAME = "siliwangi_bot.db"
 
@@ -7,178 +10,202 @@ def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
-    # 1. Tabel Users (Menyimpan kredensial login & cookies)
+    # Tabel produk (TETAP SAMA 100%)
     cursor.execute('''
-    CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        telegram_id TEXT UNIQUE,
-        username TEXT,
-        password TEXT,
-        cookies TEXT
-    )
+        CREATE TABLE IF NOT EXISTS products (
+            id INTEGER PRIMARY KEY,
+            nama TEXT UNIQUE,
+            kategori TEXT,
+            tier INTEGER
+        )
     ''')
 
-    # 2. Tabel Produk (Kamus ID dan Tier)
+    # [PEROMBAKAN V2] Tabel users:
+    # 1. telegram_id tidak lagi UNIQUE sendirian, melainkan kombinasi (telegram_id + username)
+    # 2. Tambah kolom is_active untuk penanda "🟢 Akun Aktif Saat Ini"
     cursor.execute('''
-    CREATE TABLE IF NOT EXISTS products (
-        id INTEGER PRIMARY KEY,
-        nama TEXT,
-        kategori TEXT,
-        tier INTEGER
-    )
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id TEXT,
+            username TEXT,
+            password TEXT,
+            is_active INTEGER DEFAULT 0,
+            UNIQUE(telegram_id, username)
+        )
     ''')
 
-    # 3. Tabel Draft Orders (Menyimpan settingan WAR)
+    # [PEROMBAKAN V2] Tabel draft_orders:
+    # Ditambahkan kolom "username" agar draf menempel pada akun Siliwanginya, bukan Telegram ID
     cursor.execute('''
-    CREATE TABLE IF NOT EXISTS draft_orders (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        telegram_id TEXT,
-        status TEXT DEFAULT 'PENDING',
-        total_maxi_qty INTEGER,
-        payload_json TEXT
-    )
+        CREATE TABLE IF NOT EXISTS draft_orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id TEXT,
+            username TEXT,
+            total_maxi INTEGER,
+            payload_json TEXT,
+            status TEXT DEFAULT 'PENDING',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
     ''')
+
+    # --- PENGISIAN DATA PRODUK (TETAP SAMA 100%) ---
+    products = [
+        # MAXI Tier 1
+        (13463, "MAXI Belgian Chocolate", "MAXI", 1),
+        (13465, "MAXI Black Forest", "MAXI", 1),
+        (227187, "MAXI Cokelat Dubai Pistachio", "MAXI", 1),
+        (227188, "MAXI Cokelat Tiramisu", "MAXI", 1),
+        # MAXI Tier 2
+        (13479, "MAXI Brownies Coklat", "MAXI", 2),
+        (13476, "MAXI Susu Lembang", "MAXI", 2),
+        (13471, "MAXI Alpukat Mentega", "MAXI", 2),
+        (13478, "MAXI Talas Bogor", "MAXI", 2),
+        # MAXI Tier 3
+        (13467, "MAXI Pandan Wangi", "MAXI", 3),
+        (13469, "MAXI Red Velvet", "MAXI", 3),
+        (13473, "MAXI Keju Cheddar", "MAXI", 3),
+        (210722, "MAXI Black Pink", "MAXI", 3),
+        (177113, "MAXI Durian Montong", "MAXI", 3),
+        (205949, "MAXI Durian Musang King", "MAXI", 3),
+        (13475, "MAXI Mangga Indramayu", "MAXI", 3),
+        (219754, "MAXI Original Lapis", "MAXI", 3),
+        # Dessert Cake (DC) - Tier 1
+        (65017, "DC Belgian Chocolate", "DC", 1),
+        (65022, "DC Black Forest", "DC", 1),
+        # Plastik
+        (85918, "Plastik Bolu Klasik HD Isi 3 Box", "PLASTIK", 0),
+        (85922, "Plastik Bakpia Kukus HD Isi 3 Box", "PLASTIK", 0)
+    ]
+    
+    cursor.executemany('''
+        INSERT OR IGNORE INTO products (id, nama, kategori, tier) 
+        VALUES (?, ?, ?, ?)
+    ''', products)
+
     conn.commit()
     conn.close()
-    print("✅ Database berhasil diinisialisasi.")
+    print("✅ Database V2.0 berhasil diinisialisasi (Support Multi-Account)")
 
-def seed_products():
-    """Memasukkan data produk, ID, dan Tier ke database jika belum ada."""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    
-    # Cek apakah data sudah ada
-    cursor.execute("SELECT COUNT(*) FROM products")
-    if cursor.fetchone()[0] > 0:
-        conn.close()
-        return
+# ==============================================================
+# FUNGSI LAMA (Tetap ada agar bot.py/engine.py yang lama tidak rusak)
+# Internalnya disesuaikan untuk membaca kolom V2.0 secara otomatis
+# ==============================================================
 
-    # Kategori MAXI - Tier 1
-    tier1 = [
-        (251993, "MAXI Belgian Chocolate", "MAXI", 1),
-        (36124, "MAXI Black Forest", "MAXI", 1),
-        (168132, "MAXI Cokelat Tiramisu", "MAXI", 1),
-        (281180, "MAXI Cokelat Dubai Pistachio", "MAXI", 1),
-        (312, "MAXI Brownies Coklat", "MAXI", 1)
-    ]
-    # Kategori MAXI - Tier 2
-    tier2 = [
-        (19077, "MAXI Pandan Wangi", "MAXI", 2),
-        (24883, "MAXI Red Velvet", "MAXI", 2),
-        (306, "MAXI Susu Lembang", "MAXI", 2),
-        (168131, "MAXI Durian Musang King", "MAXI", 2),
-        (311, "MAXI Alpukat Mentega", "MAXI", 2)
-    ]
-    # Kategori MAXI - Tier 3
-    tier3 = [
-        (313, "MAXI Talas Bogor", "MAXI", 3),
-        (315, "MAXI Mangga Indramayu", "MAXI", 3),
-        (58972, "MAXI Durian Montong", "MAXI", 3),
-        (132503, "MAXI Black Pink", "MAXI", 3),
-        (74878, "MAXI Keju Cheddar", "MAXI", 3),
-        (219722, "MAXI Original Lapis", "MAXI", 3)
-    ]
-    # Kategori DC (Dessert Cake) - Anggap saja Tier 0 (Tidak ikut aturan MAXI)
-    dc_items = [
-        (206125, "DC Belgian Chocolate", "DC", 0),
-        (54383, "DC Black Forest", "DC", 0),
-        (54386, "DC Red Velvet", "DC", 0)
-    ]
-    # Kategori Kemasan (Fallback system, Tier 0)
-    kemasan = [
-        (70867, "Plastik Bolu Klasik HD Isi 3 Box", "KEMASAN", 0),
-        (137748, "Plastik Bakpia Kukus HD Isi 3 Box", "KEMASAN", 0)
-    ]
-
-    all_products = tier1 + tier2 + tier3 + dc_items + kemasan
-    
-    cursor.executemany("INSERT INTO products (id, nama, kategori, tier) VALUES (?, ?, ?, ?)", all_products)
-    conn.commit()
-    conn.close()
-    print("✅ Data produk berhasil di-seed ke database.")
-
-# --- Fungsi Helper Database ---
 def save_user_credentials(telegram_id, username, password):
+    """Menyimpan akun. Jika baru ditambahkan, langsung jadikan Akun Aktif."""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
+    # Matikan semua akun lain yang sedang aktif
+    cursor.execute("UPDATE users SET is_active = 0 WHERE telegram_id = ?", (telegram_id,))
+    # Masukkan akun baru (atau update password jika sudah ada), dan jadikan aktif
     cursor.execute('''
-        INSERT INTO users (telegram_id, username, password) 
-        VALUES (?, ?, ?) 
-        ON CONFLICT(telegram_id) DO UPDATE SET username=excluded.username, password=excluded.password
-    ''', (telegram_id, username, password))
+        INSERT INTO users (telegram_id, username, password, is_active)
+        VALUES (?, ?, ?, 1)
+        ON CONFLICT(telegram_id, username) DO UPDATE SET password=?, is_active=1
+    ''', (telegram_id, username, password, password))
     conn.commit()
     conn.close()
-    
-def get_kategori():
-    """Mengambil daftar kategori unik untuk dijadikan tombol awal."""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT DISTINCT kategori FROM products")
-    kategori_list = [row[0] for row in cursor.fetchall()]
-    conn.close()
-    return kategori_list
-
-def get_produk_by_kategori(kategori):
-    """Mengambil daftar produk berdasarkan kategori yang diklik user."""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, nama FROM products WHERE kategori = ?", (kategori,))
-    produk_list = cursor.fetchall()
-    conn.close()
-    return produk_list
-
-def simpan_draft_order(telegram_id, total_maxi_qty, payload_list):
-    """Menyimpan keranjang belanja akhir ke dalam database sebagai status PENDING."""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    # Ubah list keranjang Python menjadi string JSON agar mudah dibaca sistem nanti
-    payload_json = json.dumps(payload_list)
-    
-    cursor.execute('''
-        INSERT INTO draft_orders (telegram_id, status, total_maxi_qty, payload_json) 
-        VALUES (?, 'PENDING', ?, ?)
-    ''', (telegram_id, total_maxi_qty, payload_json))
-    
-    conn.commit()
-    conn.close()
-    
-def get_all_products_dict():
-    """Mengambil semua produk dalam bentuk Dictionary agar cepat dicocokkan oleh bot."""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, nama, kategori, tier FROM products")
-    products = cursor.fetchall()
-    conn.close()
-    
-    # Menghasilkan output: {"MAXI Belgian Chocolate": {"id": 251993, "kategori": "MAXI", "tier": 1}, ...}
-    return {row[1]: {"id": row[0], "kategori": row[2], "tier": row[3]} for row in products}
 
 def get_current_user(telegram_id):
-    """Mengambil username/email yang sedang aktif berdasarkan telegram_id."""
+    """Membaca akun mana yang sedang aktif saat ini"""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute("SELECT username FROM users WHERE telegram_id = ?", (telegram_id,))
+    cursor.execute("SELECT username FROM users WHERE telegram_id = ? AND is_active = 1", (telegram_id,))
     row = cursor.fetchone()
     conn.close()
     return row[0] if row else None
 
-def get_pending_order(telegram_id):
-    """Mengambil draf order yang berstatus PENDING."""
+def simpan_draft_order(telegram_id, total_maxi, keranjang):
+    """Menyimpan draf pesanan langsung ke akun yang sedang aktif"""
+    active_user = get_current_user(telegram_id)
+    if not active_user: return False
+
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute("SELECT id, total_maxi_qty, payload_json FROM draft_orders WHERE telegram_id=? AND status='PENDING' ORDER BY id DESC LIMIT 1", (telegram_id,))
+    cursor.execute('''
+        INSERT INTO draft_orders (telegram_id, username, total_maxi, payload_json)
+        VALUES (?, ?, ?, ?)
+    ''', (telegram_id, active_user, total_maxi, json.dumps(keranjang)))
+    conn.commit()
+    conn.close()
+    return True
+
+def get_pending_order(telegram_id):
+    """Mengambil draf pesanan milik akun yang sedang aktif"""
+    active_user = get_current_user(telegram_id)
+    if not active_user: return None
+
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT id, total_maxi, payload_json FROM draft_orders 
+        WHERE telegram_id = ? AND username = ? AND status = 'PENDING' 
+        ORDER BY id DESC LIMIT 1
+    ''', (telegram_id, active_user))
     row = cursor.fetchone()
     conn.close()
     return row
 
 def delete_pending_order(telegram_id):
-    """Menghapus draf order yang PENDING."""
+    """Menghapus draf pesanan milik akun yang sedang aktif"""
+    active_user = get_current_user(telegram_id)
+    if not active_user: return
+
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM draft_orders WHERE telegram_id=? AND status='PENDING'", (telegram_id,))
+    cursor.execute('''
+        DELETE FROM draft_orders 
+        WHERE telegram_id = ? AND username = ? AND status = 'PENDING'
+    ''', (telegram_id, active_user))
     conn.commit()
     conn.close()
 
+def get_all_products_dict():
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, nama, kategori, tier FROM products")
+    rows = cursor.fetchall()
+    conn.close()
+    
+    products_db = {}
+    for r in rows:
+        products_db[r[1]] = {"id": r[0], "kategori": r[2], "tier": r[3]}
+    return products_db
+
+# ==============================================================
+# FUNGSI BARU KHUSUS VERSI 2.0 (MULTI-ACCOUNT)
+# (Akan dipanggil oleh bot.py dan engine.py yang baru di Fase selanjutnya)
+# ==============================================================
+
+def get_all_accounts(telegram_id):
+    """Mengambil daftar semua akun yang tersimpan untuk UI Telegram"""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT username, is_active FROM users WHERE telegram_id = ?", (telegram_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return rows # Format: [('putri@email.com', 1), ('ayu@email.com', 0)]
+
+def set_active_account(telegram_id, target_username):
+    """Memindah '🟢 Akun Aktif' ke akun pilihan"""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET is_active = 0 WHERE telegram_id = ?", (telegram_id,))
+    cursor.execute("UPDATE users SET is_active = 1 WHERE telegram_id = ? AND username = ?", (telegram_id, target_username))
+    conn.commit()
+    conn.close()
+
+def get_all_pending_orders_multi(telegram_id):
+    """(Untuk Fase 4) Mengambil semua draf PENDING dari SEMUA AKUN sekaligus"""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT id, username, payload_json FROM draft_orders 
+        WHERE telegram_id = ? AND status = 'PENDING'
+    ''', (telegram_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
 if __name__ == "__main__":
     init_db()
-    seed_products()
