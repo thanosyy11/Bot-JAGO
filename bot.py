@@ -16,7 +16,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from database import (
     save_user_credentials, get_all_products_dict, simpan_draft_order,
     get_current_user, get_pending_order, delete_pending_order,
-    get_all_accounts, set_active_account, get_all_pending_orders_multi
+    get_all_accounts, set_active_account, get_all_pending_orders_multi,
+    get_order_history # [FITUR BARU] Mengambil riwayat order
 )
 from engine import SiliwangiEngine
 
@@ -220,28 +221,50 @@ async def cb_menu_status(callback: CallbackQuery):
     btn = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Kembali", callback_data="kembali_ke_menu")]])
     await callback.message.edit_text(teks, reply_markup=btn, parse_mode="Markdown")
 
+# [FITUR BARU] Modifikasi Menu Kelola & Tambah Tombol Riwayat
 @router.callback_query(F.data == "menu_kelola")
 async def cb_menu_kelola(callback: CallbackQuery):
     current_user = get_current_user(str(callback.from_user.id))
     pending = get_pending_order(str(callback.from_user.id))
     
-    if not pending:
+    keyboard = []
+    if pending:
+        order_id, total_maxi, payload_json = pending
+        keranjang = json.loads(payload_json)
+        teks_keranjang = "\n".join([f"- {item['qty']}x {item['nama']}" for item in keranjang])
+        
+        teks = f"📝 **DRAF AKUN: {current_user}**\n\n{teks_keranjang}\n\n📦 **Total MAXI:** {total_maxi} pcs"
+        keyboard.append([InlineKeyboardButton(text="✏️ Edit Order", callback_data="edit_order")])
+        keyboard.append([InlineKeyboardButton(text="🗑️ Hapus Order", callback_data="hapus_order")])
+    else:
         teks = f"⭕ Tidak ada draf PENDING untuk akun **{current_user}**.\n\n*(Jika ingin melihat draf akun lain, ganti Akun Aktif di menu Kelola Multi-Akun)*"
-        btn = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Kembali", callback_data="kembali_ke_menu")]])
-        await callback.message.edit_text(teks, reply_markup=btn, parse_mode="Markdown")
+
+    # Menyisipkan Tombol Riwayat
+    keyboard.append([InlineKeyboardButton(text="📜 Lihat Riwayat Order", callback_data="lihat_riwayat")])
+    keyboard.append([InlineKeyboardButton(text="🔙 Kembali", callback_data="kembali_ke_menu")])
+    
+    await callback.message.edit_text(teks, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard), parse_mode="Markdown")
+
+# [FITUR BARU] Fungsi Membaca Riwayat dari Database
+@router.callback_query(F.data == "lihat_riwayat")
+async def cb_lihat_riwayat(callback: CallbackQuery):
+    current_user = get_current_user(str(callback.from_user.id))
+    rows = get_order_history(str(callback.from_user.id), current_user)
+    
+    if not rows:
+        await callback.answer("Belum ada riwayat sukses untuk akun ini.", show_alert=True)
         return
         
-    order_id, total_maxi, payload_json = pending
-    keranjang = json.loads(payload_json)
-    teks_keranjang = "\n".join([f"- {item['qty']}x {item['nama']}" for item in keranjang])
-    
-    teks = (f"📝 **DRAF AKUN: {current_user}**\n\n{teks_keranjang}\n\n **Total MAXI:** {total_maxi} pcs")
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✏️ Edit Order", callback_data="edit_order")],
-        [InlineKeyboardButton(text="🗑️ Hapus Order", callback_data="hapus_order")],
-        [InlineKeyboardButton(text="🔙 Kembali", callback_data="kembali_ke_menu")]
-    ])
-    await callback.message.edit_text(teks, reply_markup=keyboard, parse_mode="Markdown")
+    teks = f"📜 **RIWAYAT ORDER: {current_user}** (3 Terakhir)\n\n"
+    for tgl, total, payload in rows:
+        keranjang = json.loads(payload)
+        preview = ", ".join([f"{i['qty']}x {i['nama']}" for i in keranjang[:3]])
+        if len(keranjang) > 3:
+            preview += "..."
+        teks += f"🗓️ **{tgl}**\n📦 Total: {total} pcs\n🛒 Isi: {preview}\n\n"
+        
+    btn = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Kembali", callback_data="menu_kelola")]])
+    await callback.message.edit_text(teks, reply_markup=btn, parse_mode="Markdown")
 
 @router.callback_query(F.data == "hapus_order")
 async def cb_hapus_order(callback: CallbackQuery):
@@ -298,7 +321,7 @@ async def cb_menu_order(callback: CallbackQuery, state: FSMContext):
         "- 0x DC Belgian Chocolate\n"
         "- 0x DC Black Forest\n"
         "- 50x Plastik Bolu Klasik HD Isi 3 Box\n\n"
-        "*(Catatan: Hapus baris yang tidak perlu, atau cukup jadikan 0x)*"
+"*(Catatan: Hapus baris yang tidak perlu, atau cukup jadikan 0x)*"
     )
     await callback.message.edit_text(template, parse_mode="Markdown")
     await state.set_state(OrderState.waiting_for_template)

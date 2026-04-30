@@ -21,8 +21,6 @@ def init_db():
     ''')
 
     # [PEROMBAKAN V2] Tabel users:
-    # 1. telegram_id tidak lagi UNIQUE sendirian, melainkan kombinasi (telegram_id + username)
-    # 2. Tambah kolom is_active untuk penanda "🟢 Akun Aktif Saat Ini"
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -35,7 +33,6 @@ def init_db():
     ''')
 
     # [PEROMBAKAN V2] Tabel draft_orders:
-    # Ditambahkan kolom "username" agar draf menempel pada akun Siliwanginya, bukan Telegram ID
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS draft_orders (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -45,6 +42,19 @@ def init_db():
             payload_json TEXT,
             status TEXT DEFAULT 'PENDING',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    # [FITUR BARU V2.1] Tabel Riwayat Order:
+    # Untuk mencatat pesanan yang sukses di-checkout
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS order_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id TEXT,
+            username TEXT,
+            total_maxi INTEGER,
+            payload_json TEXT,
+            tanggal TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
 
@@ -84,20 +94,16 @@ def init_db():
 
     conn.commit()
     conn.close()
-    print("✅ Database V2.0 berhasil diinisialisasi (Support Multi-Account)")
+    print("✅ Database V2.0 berhasil diinisialisasi (Support Multi-Account & Riwayat)")
 
 # ==============================================================
-# FUNGSI LAMA (Tetap ada agar bot.py/engine.py yang lama tidak rusak)
-# Internalnya disesuaikan untuk membaca kolom V2.0 secara otomatis
+# FUNGSI LAMA
 # ==============================================================
 
 def save_user_credentials(telegram_id, username, password):
-    """Menyimpan akun. Jika baru ditambahkan, langsung jadikan Akun Aktif."""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    # Matikan semua akun lain yang sedang aktif
     cursor.execute("UPDATE users SET is_active = 0 WHERE telegram_id = ?", (telegram_id,))
-    # Masukkan akun baru (atau update password jika sudah ada), dan jadikan aktif
     cursor.execute('''
         INSERT INTO users (telegram_id, username, password, is_active)
         VALUES (?, ?, ?, 1)
@@ -107,7 +113,6 @@ def save_user_credentials(telegram_id, username, password):
     conn.close()
 
 def get_current_user(telegram_id):
-    """Membaca akun mana yang sedang aktif saat ini"""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("SELECT username FROM users WHERE telegram_id = ? AND is_active = 1", (telegram_id,))
@@ -116,7 +121,6 @@ def get_current_user(telegram_id):
     return row[0] if row else None
 
 def simpan_draft_order(telegram_id, total_maxi, keranjang):
-    """Menyimpan draf pesanan langsung ke akun yang sedang aktif"""
     active_user = get_current_user(telegram_id)
     if not active_user: return False
 
@@ -131,7 +135,6 @@ def simpan_draft_order(telegram_id, total_maxi, keranjang):
     return True
 
 def get_pending_order(telegram_id):
-    """Mengambil draf pesanan milik akun yang sedang aktif"""
     active_user = get_current_user(telegram_id)
     if not active_user: return None
 
@@ -147,7 +150,6 @@ def get_pending_order(telegram_id):
     return row
 
 def delete_pending_order(telegram_id):
-    """Menghapus draf pesanan milik akun yang sedang aktif"""
     active_user = get_current_user(telegram_id)
     if not active_user: return
 
@@ -173,21 +175,18 @@ def get_all_products_dict():
     return products_db
 
 # ==============================================================
-# FUNGSI BARU KHUSUS VERSI 2.0 (MULTI-ACCOUNT)
-# (Akan dipanggil oleh bot.py dan engine.py yang baru di Fase selanjutnya)
+# FUNGSI BARU KHUSUS VERSI 2.0 (MULTI-ACCOUNT & RIWAYAT)
 # ==============================================================
 
 def get_all_accounts(telegram_id):
-    """Mengambil daftar semua akun yang tersimpan untuk UI Telegram"""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("SELECT username, is_active FROM users WHERE telegram_id = ?", (telegram_id,))
     rows = cursor.fetchall()
     conn.close()
-    return rows # Format: [('putri@email.com', 1), ('ayu@email.com', 0)]
+    return rows
 
 def set_active_account(telegram_id, target_username):
-    """Memindah '🟢 Akun Aktif' ke akun pilihan"""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("UPDATE users SET is_active = 0 WHERE telegram_id = ?", (telegram_id,))
@@ -196,13 +195,26 @@ def set_active_account(telegram_id, target_username):
     conn.close()
 
 def get_all_pending_orders_multi(telegram_id):
-    """(Untuk Fase 4) Mengambil semua draf PENDING dari SEMUA AKUN sekaligus"""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute('''
         SELECT id, username, payload_json FROM draft_orders 
         WHERE telegram_id = ? AND status = 'PENDING'
     ''', (telegram_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+def get_order_history(telegram_id, username):
+    """Mengambil riwayat sukses maksimal 3 terakhir"""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT datetime(tanggal, 'localtime'), total_maxi, payload_json 
+        FROM order_history 
+        WHERE telegram_id=? AND username=? 
+        ORDER BY id DESC LIMIT 3
+    ''', (telegram_id, username))
     rows = cursor.fetchall()
     conn.close()
     return rows

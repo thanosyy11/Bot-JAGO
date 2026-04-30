@@ -16,7 +16,6 @@ logger = logging.getLogger(__name__)
 DB_NAME = "siliwangi_bot.db"
 
 class SiliwangiEngine:
-    # [PERUBAHAN V2]: Mesin sekarang wajib menerima 'username' saat dipanggil
     def __init__(self, telegram_id, username):
         self.telegram_id = telegram_id
         self.username = username
@@ -31,12 +30,8 @@ class SiliwangiEngine:
             "Referer": "https://siliwangibolukukus.com/"
         }
         
-        # Setiap akun akan memiliki "Browser/Client" nya masing-masing secara terisolasi
         self.client = httpx.AsyncClient(headers=self.headers, follow_redirects=True, timeout=15.0)
 
-    # ==========================================
-    # MEKANISME RETRY (ANTI SERVER DOWN)
-    # ==========================================
     async def _safe_request(self, method, url, max_retries=4, **kwargs):
         for attempt in range(1, max_retries + 1):
             try:
@@ -59,7 +54,6 @@ class SiliwangiEngine:
                 return None
         return None
 
-    # [PERUBAHAN V2]: Mengambil password khusus untuk username ini saja
     def _get_credentials(self):
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
@@ -144,15 +138,30 @@ class SiliwangiEngine:
             logger.error(f"Gagal mengambil Checkout Nonce {self.username}: {str(e)}")
             return False
 
+    # [PERBAIKAN V2.1]: Radar Intelijen Perekam Error
     async def _add_to_cart(self, prod_id, qty):
         payload = {"add-to-cart": prod_id, "quantity": qty}
         try:
             res = await self._safe_request('POST', "https://siliwangibolukukus.com/cart/", data=payload)
             if not res: return False
-            if "tidak dapat menambahkan" in res.text.lower() or "out of stock" in res.text.lower():
+            
+            res_text_lower = res.text.lower()
+            
+            if "tidak dapat menambahkan" in res_text_lower or "out of stock" in res_text_lower or "sisa" in res_text_lower:
+                soup = BeautifulSoup(res.text, 'html.parser')
+                error_notices = soup.find_all(class_=['woocommerce-error', 'woocommerce-message', 'error', 'woocommerce-info'])
+                
+                pesan_error = "Pesan tersembunyi (Tidak ditemukan di class standar)"
+                if error_notices:
+                    pesan_error = " | ".join([e.get_text(strip=True) for e in error_notices])
+                
+                logger.warning(f"🕵️ [INTEL STOK] Akun: {self.username} | ID Produk: {prod_id} | Qty: {qty}")
+                logger.warning(f"📝 [PESAN SILIWANGI]: {pesan_error}")
                 return False
+                
             return True
-        except Exception:
+        except Exception as e:
+            logger.error(f"Error pada _add_to_cart [{self.username}]: {str(e)}")
             return False
 
     async def add_to_cart_with_fallback(self, item):
@@ -192,7 +201,6 @@ class SiliwangiEngine:
         logger.error(f"💀 [{self.username}] GAGAL TOTAL! Seluruh varian {kategori} LUDES.")
         return False
 
-    # [PERUBAHAN V2]: Hanya mengambil draf milik username ini saja
     async def execute_order(self):
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
@@ -213,16 +221,36 @@ class SiliwangiEngine:
         if not await self.get_checkout_nonce(): return False
         return await self._process_checkout()
 
+    # [PERBAIKAN V2.1]: Radar Keranjang & Fallback Metode Pembayaran Ganda
     async def _process_checkout(self):
         try:
+            # 1. RADAR SEBELUM KASIR: CEK STATUS FINAL KERANJANG
+            cart_res = await self._safe_request('GET', "https://siliwangibolukukus.com/cart/")
+            if cart_res:
+                soup_cart = BeautifulSoup(cart_res.text, 'html.parser')
+                error_notices = soup_cart.find_all(class_=['woocommerce-error', 'error'])
+                if error_notices:
+                    pesan_error = " | ".join([e.get_text(strip=True) for e in error_notices])
+                    logger.error(f"❌ [{self.username}] RADAR: Terdapat error di keranjang! Alasan Siliwangi: {pesan_error}")
+                    return False
+                
+                # Memastikan barang benar-benar diikat oleh sesi Siliwangi
+                cart_items = soup_cart.find_all('tr', class_='cart_item')
+                if not cart_items:
+                    logger.error(f"❌ [{self.username}] RADAR: KERANJANG KOSONG SECARA GAIB! Server gagal mengikat sesi.")
+                    return False
+
+            # 2. MASUK KASIR
             res = await self._safe_request('GET', "https://siliwangibolukukus.com/checkout/")
-            if not res: return False
+            if not res or "checkout" not in str(res.url): 
+                logger.error(f"❌ [{self.username}] Terpental dari kasir (302). Dialihkan ke: {res.url if res else 'Unknown'}")
+                return False
             
             soup = BeautifulSoup(res.text, 'html.parser')
             form = soup.find('form', {'name': 'checkout'})
             if not form: return False
 
-            payload = {}
+            base_payload = {}
             for inp in form.find_all(['input', 'select', 'textarea']):
                 name = inp.get('name')
                 if not name: continue
@@ -230,46 +258,70 @@ class SiliwangiEngine:
                 if inp.name == 'select':
                     sel = inp.find('option', selected=True)
                     val = sel['value'] if sel else ''
-                payload[name] = val
+                base_payload[name] = val
 
             besok = datetime.now() + timedelta(days=1)
             bulan = ["", "Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"]
             
-            payload['payment_method'] = 'cheque'
-            payload['woocommerce-process-checkout-nonce'] = self.checkout_nonce
-            payload['h_deliverydate'] = besok.strftime("%d-%m-%Y")
-            payload['e_deliverydate'] = f"{besok.day} {bulan[besok.month]}, {besok.year}"
-            payload['orddd_min_date_set'] = payload['h_deliverydate']
+            base_payload['woocommerce-process-checkout-nonce'] = self.checkout_nonce
+            base_payload['h_deliverydate'] = besok.strftime("%d-%m-%Y")
+            base_payload['e_deliverydate'] = f"{besok.day} {bulan[besok.month]}, {besok.year}"
+            base_payload['orddd_min_date_set'] = base_payload['h_deliverydate']
             
             checkout_url = "https://siliwangibolukukus.com/?wc-ajax=checkout"
-            final_res = await self._safe_request('POST', checkout_url, data=payload)
-            if not final_res: return False
-            
-            if "order-received" in str(final_res.url) or "Pesanan" in final_res.text or "Order Complete" in final_res.text:
-                logger.info(f"🎉 Checkout BERHASIL [{self.username}]. Order ID DB: {self.order_id}")
-                self._mark_success()
-                return True
 
-            try:
-                result = final_res.json()
-                if result.get('result') == 'success':
-                    logger.info(f"🎉 Checkout BERHASIL [{self.username}]. Order ID DB: {self.order_id}")
+            # 3. STRATEGI FALLBACK GANDA (Opsi A: Cheque, Opsi B: COD)
+            metode_pembayaran = ['cheque', 'cod']
+            
+            for metode in metode_pembayaran:
+                logger.info(f"🔄 [{self.username}] Mencoba checkout dengan metode: {metode.upper()}")
+                base_payload['payment_method'] = metode
+                
+                final_res = await self._safe_request('POST', checkout_url, data=base_payload)
+                if not final_res: continue
+                
+                # Cek Redirect HTML
+                if "order-received" in str(final_res.url) or "Pesanan" in final_res.text or "Order Complete" in final_res.text:
+                    logger.info(f"🎉 Checkout BERHASIL [{self.username}] via {metode.upper()}. Order ID DB: {self.order_id}")
                     self._mark_success()
                     return True
-                else:
-                    logger.error(f"Checkout DITOLAK [{self.username}]: {final_res.text}")
-                    return False
-            except Exception as e:
-                logger.error(f"Checkout Gagal [{self.username}]. Respons: {final_res.text[:150]}...", exc_info=True)
-                return False
+
+                # Cek Balasan JSON
+                try:
+                    result = final_res.json()
+                    if result.get('result') == 'success':
+                        logger.info(f"🎉 Checkout BERHASIL [{self.username}] via {metode.upper()}. Order ID DB: {self.order_id}")
+                        self._mark_success()
+                        return True
+                    else:
+                        logger.warning(f"⚠️ DITOLAK via {metode.upper()} [{self.username}]: {final_res.text}")
+                        # Jika Cheque ditolak, loop akan lanjut mengeksekusi COD
+                except Exception:
+                    logger.warning(f"⚠️ Gagal membaca JSON via {metode.upper()} [{self.username}]. Respons: {final_res.text[:100]}...")
+
+            # Jika loop selesai dan tidak Return True, berarti Cheque & COD gagal semua
+            logger.error(f"💀 [{self.username}] SEMUA METODE PEMBAYARAN GAGAL TOTAL.")
+            return False
 
         except Exception as e:
             logger.error(f"Gagal checkout [{self.username}]: {str(e)}", exc_info=True)
             return False
 
+    # [PERBAIKAN V2.1]: Sinkronisasi ke Tabel Riwayat
     def _mark_success(self):
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
+        
+        # Ekstrak data untuk dipindahkan ke Riwayat
+        cursor.execute("SELECT telegram_id, username, total_maxi, payload_json FROM draft_orders WHERE id=?", (self.order_id,))
+        row = cursor.fetchone()
+        
+        if row:
+            cursor.execute('''
+                INSERT INTO order_history (telegram_id, username, total_maxi, payload_json)
+                VALUES (?, ?, ?, ?)
+            ''', row)
+            
         cursor.execute("UPDATE draft_orders SET status='SUCCESS' WHERE id=?", (self.order_id,))
         conn.commit()
         conn.close()
