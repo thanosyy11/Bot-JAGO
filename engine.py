@@ -4,6 +4,7 @@ from bs4 import BeautifulSoup
 import sqlite3
 import json
 from datetime import datetime, timedelta
+import pytz
 import logging
 
 logging.basicConfig(
@@ -260,11 +261,12 @@ class SiliwangiEngine:
                     val = sel['value'] if sel else ''
                 base_payload[name] = val
 
-            besok = datetime.now() + timedelta(days=1)
+            zona_waktu = pytz.timezone('Asia/Jakarta')
+            besok = datetime.now(zona_waktu) + timedelta(days=1)
             bulan = ["", "Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"]
             
             base_payload['woocommerce-process-checkout-nonce'] = self.checkout_nonce
-            base_payload['h_deliverydate'] = besok.strftime("%d-%m-%Y")
+            base_payload['h_deliverydate'] = f"{besok.day}-{besok.month}-{besok.year}"
             base_payload['e_deliverydate'] = f"{besok.day} {bulan[besok.month]}, {besok.year}"
             base_payload['orddd_min_date_set'] = base_payload['h_deliverydate']
             

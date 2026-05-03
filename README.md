@@ -1,6 +1,6 @@
-# 🤖 Bot JAGO - Auto CheckOut
+# 🤖 Bot JAGO
 
-Bot Telegram yang dirancang untuk memenangkan "War Stok" di website e-commerce berbasis WooCommerce. Bot ini berjalan 24 jam dengan menggunakan penjadwalan presisi tinggi.
+Bot Telegram yang dirancang untuk memenangkan "War Stok" di website e-commerce berbasis WooCommerce.
 
 ## 🌟 Fitur Utama
 - **Auto-Login & Cookie Session**: Mengamankan sesi login secara diam-diam (pemanasan) sebelum jam eksekusi.

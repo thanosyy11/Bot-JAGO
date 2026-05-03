@@ -17,7 +17,7 @@ from database import (
     save_user_credentials, get_all_products_dict, simpan_draft_order,
     get_current_user, get_pending_order, delete_pending_order,
     get_all_accounts, set_active_account, get_all_pending_orders_multi,
-    get_order_history # [FITUR BARU] Mengambil riwayat order
+    get_order_history, init_db # [FITUR BARU] Mengambil riwayat order & inisialisasi DB
 )
 from engine import SiliwangiEngine
 
@@ -102,7 +102,7 @@ async def job_eksekusi():
     jeda = 0.0
     for username, engine in pasukan.items():
         tasks.append(eksekusi_dengan_jeda(engine, jeda, username))
-        jeda += 0.3 # Akun berikutnya akan telat 300 milidetik
+        jeda += 1.5 # [PERBAIKAN] Jeda antar akun dinaikkan jadi 1.5 detik untuk hindari SQLite DB Locked
         
     # EKSEKUSI SEMUANYA SECARA BERSAMAAN (CONCURRENCY)
     hasil_perang = await asyncio.gather(*tasks)
@@ -404,6 +404,7 @@ async def cb_kembali(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 async def main():
+    init_db() # [PERBAIKAN] Membuat tabel DB jika belum ada di LXC
     dp.include_router(router)
     scheduler.start()
     
