@@ -6,6 +6,7 @@ import json
 from datetime import datetime, timedelta
 import pytz
 import logging
+import os
 
 logging.basicConfig(
     filename='siliwangi_error.log', 
@@ -32,6 +33,18 @@ class SiliwangiEngine:
         }
         
         self.client = httpx.AsyncClient(headers=self.headers, follow_redirects=True, timeout=15.0)
+
+    def _simpan_snapshot_html(self, html_text, nama_kejadian):
+        """Menyimpan kode HTML ke file agar bisa dibuka di browser saat terjadi error."""
+        try:
+            waktu_sekarang = datetime.now().strftime("%H%M%S")
+            username_pendek = self.username.split('@')[0] if self.username else "unknown"
+            nama_file = f"snapshot_{nama_kejadian}_{username_pendek}_{waktu_sekarang}.html"
+            with open(nama_file, 'w', encoding='utf-8') as file:
+                file.write(html_text)
+            logger.info(f"📸 SNAPSHOT TERSIMPAN: Buka file '{nama_file}' untuk melihat error!")
+        except Exception as e:
+            logger.error(f"Gagal menyimpan snapshot HTML: {str(e)}")
 
     async def _safe_request(self, method, url, max_retries=4, **kwargs):
         for attempt in range(1, max_retries + 1):
@@ -102,24 +115,34 @@ class SiliwangiEngine:
             logger.error(f"Error saat login {self.username}: {str(e)}", exc_info=True)
             return False
 
+    async def _validate_kelipatan_12(self, keranjang):
+        """Mengecek apakah total pesanan memenuhi syarat kelipatan 12."""
+        total_qty = sum(item['qty'] for item in keranjang)
+        sisa = total_qty % 12
+        logger.info(f"🧮 [{self.username}] Mengecek draf: Total item = {total_qty} pcs")
+        if sisa == 0:
+            logger.info(f"✅ [{self.username}] Total {total_qty} pcs memenuhi kelipatan 12. Aman!")
+            return True
+        else:
+            kekurangan = 12 - sisa
+            logger.error(f"❌ [{self.username}] ATURAN KELIPATAN 12 DILANGGAR!")
+            logger.error(f"📝 [SOLUSI]: Total {total_qty} pcs. Kamu harus menambah {kekurangan} pcs, atau mengurangi {sisa} pcs.")
+            return False
+
     async def clear_cart(self):
         logger.info(f"🧹 [{self.username}] Mengecek dan membersihkan keranjang hantu...")
         try:
             res = await self._safe_request('GET', "https://siliwangibolukukus.com/cart/")
             if not res: return
-            
             soup = BeautifulSoup(res.text, 'html.parser')
             remove_links = soup.find_all('a', class_='remove')
-            
             if not remove_links:
                 logger.info(f"✨ [{self.username}] Keranjang sudah bersih.")
                 return
-
             for link in remove_links:
                 href = link.get('href')
                 if href:
                     await self._safe_request('GET', href)
-            
             logger.info(f"🗑️ [{self.username}] Menghapus {len(remove_links)} item sisa.")
         except Exception as e:
             logger.error(f"Gagal membersihkan keranjang {self.username}: {str(e)}")
@@ -128,7 +151,6 @@ class SiliwangiEngine:
         try:
             res = await self._safe_request('GET', "https://siliwangibolukukus.com/checkout/")
             if not res: return False
-            
             soup = BeautifulSoup(res.text, 'html.parser')
             nonce_field = soup.find('input', {'name': 'woocommerce-process-checkout-nonce'})
             if nonce_field:
@@ -139,27 +161,21 @@ class SiliwangiEngine:
             logger.error(f"Gagal mengambil Checkout Nonce {self.username}: {str(e)}")
             return False
 
-    # [PERBAIKAN V2.1]: Radar Intelijen Perekam Error
     async def _add_to_cart(self, prod_id, qty):
         payload = {"add-to-cart": prod_id, "quantity": qty}
         try:
             res = await self._safe_request('POST', "https://siliwangibolukukus.com/cart/", data=payload)
             if not res: return False
-            
             res_text_lower = res.text.lower()
-            
             if "tidak dapat menambahkan" in res_text_lower or "out of stock" in res_text_lower or "sisa" in res_text_lower:
                 soup = BeautifulSoup(res.text, 'html.parser')
                 error_notices = soup.find_all(class_=['woocommerce-error', 'woocommerce-message', 'error', 'woocommerce-info'])
-                
                 pesan_error = "Pesan tersembunyi (Tidak ditemukan di class standar)"
                 if error_notices:
                     pesan_error = " | ".join([e.get_text(strip=True) for e in error_notices])
-                
                 logger.warning(f"🕵️ [INTEL STOK] Akun: {self.username} | ID Produk: {prod_id} | Qty: {qty}")
                 logger.warning(f"📝 [PESAN SILIWANGI]: {pesan_error}")
                 return False
-                
             return True
         except Exception as e:
             logger.error(f"Error pada _add_to_cart [{self.username}]: {str(e)}")
@@ -181,7 +197,6 @@ class SiliwangiEngine:
             return False
             
         logger.warning(f"⚠️ [{self.username}] {nama} HABIS! Berburu varian pengganti...")
-        
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
         cursor.execute('''
@@ -214,6 +229,11 @@ class SiliwangiEngine:
         self.order_id, payload_json = row
         keranjang = json.loads(payload_json)
         
+        # Validasi Kelipatan 12
+        if not await self._validate_kelipatan_12(keranjang):
+            logger.error(f"🛑 [{self.username}] Draf ditolak otomatis sebelum masuk keranjang.")
+            return False
+        
         await self.clear_cart()
         
         for item in keranjang:
@@ -222,29 +242,27 @@ class SiliwangiEngine:
         if not await self.get_checkout_nonce(): return False
         return await self._process_checkout()
 
-    # [PERBAIKAN V2.1]: Radar Keranjang & Fallback Metode Pembayaran Ganda
     async def _process_checkout(self):
         try:
-            # 1. RADAR SEBELUM KASIR: CEK STATUS FINAL KERANJANG
             cart_res = await self._safe_request('GET', "https://siliwangibolukukus.com/cart/")
             if cart_res:
                 soup_cart = BeautifulSoup(cart_res.text, 'html.parser')
                 error_notices = soup_cart.find_all(class_=['woocommerce-error', 'error'])
                 if error_notices:
                     pesan_error = " | ".join([e.get_text(strip=True) for e in error_notices])
-                    logger.error(f"❌ [{self.username}] RADAR: Terdapat error di keranjang! Alasan Siliwangi: {pesan_error}")
+                    logger.error(f"❌ [{self.username}] RADAR: Terdapat error di keranjang! Alasan: {pesan_error}")
+                    self._simpan_snapshot_html(cart_res.text, "Error_Di_Keranjang")
                     return False
                 
-                # Memastikan barang benar-benar diikat oleh sesi Siliwangi
                 cart_items = soup_cart.find_all('tr', class_='cart_item')
                 if not cart_items:
                     logger.error(f"❌ [{self.username}] RADAR: KERANJANG KOSONG SECARA GAIB! Server gagal mengikat sesi.")
                     return False
 
-            # 2. MASUK KASIR
             res = await self._safe_request('GET', "https://siliwangibolukukus.com/checkout/")
             if not res or "checkout" not in str(res.url): 
                 logger.error(f"❌ [{self.username}] Terpental dari kasir (302). Dialihkan ke: {res.url if res else 'Unknown'}")
+                if res: self._simpan_snapshot_html(res.text, "Terpental_Kasir_302")
                 return False
             
             soup = BeautifulSoup(res.text, 'html.parser')
@@ -262,7 +280,8 @@ class SiliwangiEngine:
                 base_payload[name] = val
 
             zona_waktu = pytz.timezone('Asia/Jakarta')
-            besok = datetime.now(zona_waktu) + timedelta(days=1)
+            sekarang = datetime.now(zona_waktu)
+            besok = sekarang + timedelta(days=1)
             bulan = ["", "Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"]
             
             base_payload['woocommerce-process-checkout-nonce'] = self.checkout_nonce
@@ -270,9 +289,31 @@ class SiliwangiEngine:
             base_payload['e_deliverydate'] = f"{besok.day} {bulan[besok.month]}, {besok.year}"
             base_payload['orddd_min_date_set'] = base_payload['h_deliverydate']
             
+            # --- INJEKSI PAYLOAD WAJIB BERDASARKAN REKAMAN PLAYWRIGHT ---
+            base_payload['shipping_method[0]'] = 'flat_rate:67'
+            base_payload['orddd_first_day_of_week'] = '0'
+            base_payload['orddd_lite_delivery_date_format'] = 'd MM, yy'
+            base_payload['orddd_lite_field_note'] = ''
+            base_payload['orddd_lite_number_of_dates'] = '30'
+            base_payload['orddd_lite_date_field_mandatory'] = 'checked'
+            base_payload['orddd_lite_number_of_months'] = '1'
+            base_payload['orddd_lite_lockout_days'] = ' '
+            base_payload['orddd_lite_minimumOrderDays'] = base_payload['h_deliverydate']
+            base_payload['orddd_lite_holidays'] = ''
+            base_payload['orddd_lite_auto_populate_first_available_date'] = ''
+            base_payload['orddd_lite_calculate_min_time_disabled_days'] = ''
+            base_payload['orddd_admin_url'] = 'https://siliwangibolukukus.com/wp-admin/'
+            base_payload['orddd_lite_disable_for_holidays'] = 'no'
+            base_payload['orddd_lite_delivery_date_on_cart_page'] = ''
+            base_payload['orddd_lite_current_day'] = f"{sekarang.day}-{sekarang.month}-{sekarang.year}"
+            base_payload['orddd_lite_current_hour'] = sekarang.strftime("%H")
+            base_payload['orddd_lite_current_minute'] = sekarang.strftime("%M")
+            base_payload['orddd_lite_enable_time_slot'] = ''
+            base_payload['orddd_is_cart'] = ''
+            base_payload['orddd_lite_auto_populate_first_available_time_slot'] = ''
+            base_payload['_wp_http_referer'] = '/?wc-ajax=update_order_review'
+            
             checkout_url = "https://siliwangibolukukus.com/?wc-ajax=checkout"
-
-            # 3. STRATEGI FALLBACK GANDA (Opsi A: Cheque, Opsi B: COD)
             metode_pembayaran = ['cheque', 'cod']
             
             for metode in metode_pembayaran:
@@ -282,13 +323,11 @@ class SiliwangiEngine:
                 final_res = await self._safe_request('POST', checkout_url, data=base_payload)
                 if not final_res: continue
                 
-                # Cek Redirect HTML
                 if "order-received" in str(final_res.url) or "Pesanan" in final_res.text or "Order Complete" in final_res.text:
                     logger.info(f"🎉 Checkout BERHASIL [{self.username}] via {metode.upper()}. Order ID DB: {self.order_id}")
                     self._mark_success()
                     return True
 
-                # Cek Balasan JSON
                 try:
                     result = final_res.json()
                     if result.get('result') == 'success':
@@ -297,11 +336,10 @@ class SiliwangiEngine:
                         return True
                     else:
                         logger.warning(f"⚠️ DITOLAK via {metode.upper()} [{self.username}]: {final_res.text}")
-                        # Jika Cheque ditolak, loop akan lanjut mengeksekusi COD
+                        self._simpan_snapshot_html(final_res.text, f"Ditolak_JSON_{metode}")
                 except Exception:
                     logger.warning(f"⚠️ Gagal membaca JSON via {metode.upper()} [{self.username}]. Respons: {final_res.text[:100]}...")
 
-            # Jika loop selesai dan tidak Return True, berarti Cheque & COD gagal semua
             logger.error(f"💀 [{self.username}] SEMUA METODE PEMBAYARAN GAGAL TOTAL.")
             return False
 
@@ -309,12 +347,9 @@ class SiliwangiEngine:
             logger.error(f"Gagal checkout [{self.username}]: {str(e)}", exc_info=True)
             return False
 
-    # [PERBAIKAN V2.1]: Sinkronisasi ke Tabel Riwayat
     def _mark_success(self):
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
-        
-        # Ekstrak data untuk dipindahkan ke Riwayat
         cursor.execute("SELECT telegram_id, username, total_maxi, payload_json FROM draft_orders WHERE id=?", (self.order_id,))
         row = cursor.fetchone()
         
