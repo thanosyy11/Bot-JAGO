@@ -229,7 +229,7 @@ class SiliwangiEngine:
         self.order_id, payload_json = row
         keranjang = json.loads(payload_json)
         
-        # Validasi Kelipatan 12
+        # Validasi Kelipatan 12 diaktifkan sesuai aturan
         if not await self._validate_kelipatan_12(keranjang):
             logger.error(f"🛑 [{self.username}] Draf ditolak otomatis sebelum masuk keranjang.")
             return False
@@ -284,34 +284,32 @@ class SiliwangiEngine:
             besok = sekarang + timedelta(days=1)
             bulan = ["", "Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"]
             
-            base_payload['woocommerce-process-checkout-nonce'] = self.checkout_nonce
-            base_payload['h_deliverydate'] = f"{besok.day}-{besok.month}-{besok.year}"
-            base_payload['e_deliverydate'] = f"{besok.day} {bulan[besok.month]}, {besok.year}"
-            base_payload['orddd_min_date_set'] = base_payload['h_deliverydate']
+            # Formating string identik dengan record-all.txt browser
+            str_sekarang_h = f"{sekarang.day}-{sekarang.month}-{sekarang.year}"
+            str_besok_h = f"{besok.day}-{besok.month}-{besok.year}"
+            str_besok_e = f"{besok.day} {bulan[besok.month]}, {besok.year}"
             
-            # --- INJEKSI PAYLOAD WAJIB BERDASARKAN REKAMAN PLAYWRIGHT ---
+            base_payload['woocommerce-process-checkout-nonce'] = self.checkout_nonce
+            base_payload['h_deliverydate'] = str_besok_h
+            base_payload['e_deliverydate'] = str_besok_e
+            base_payload['orddd_min_date_set'] = str_besok_h
+            
+            # --- PENGUATAN PAYLOAD HASIL ANALISA record-all.txt ---
             base_payload['shipping_method[0]'] = 'flat_rate:67'
+            base_payload['orddd_lite_current_hour'] = sekarang.strftime("%H")
+            base_payload['orddd_lite_current_minute'] = sekarang.strftime("%M")
+            base_payload['orddd_lite_current_day'] = str_sekarang_h
+            base_payload['orddd_lite_minimumOrderDays'] = str_besok_h
             base_payload['orddd_first_day_of_week'] = '0'
             base_payload['orddd_lite_delivery_date_format'] = 'd MM, yy'
-            base_payload['orddd_lite_field_note'] = ''
             base_payload['orddd_lite_number_of_dates'] = '30'
             base_payload['orddd_lite_date_field_mandatory'] = 'checked'
             base_payload['orddd_lite_number_of_months'] = '1'
             base_payload['orddd_lite_lockout_days'] = ' '
-            base_payload['orddd_lite_minimumOrderDays'] = base_payload['h_deliverydate']
-            base_payload['orddd_lite_holidays'] = ''
-            base_payload['orddd_lite_auto_populate_first_available_date'] = ''
-            base_payload['orddd_lite_calculate_min_time_disabled_days'] = ''
             base_payload['orddd_admin_url'] = 'https://siliwangibolukukus.com/wp-admin/'
             base_payload['orddd_lite_disable_for_holidays'] = 'no'
-            base_payload['orddd_lite_delivery_date_on_cart_page'] = ''
-            base_payload['orddd_lite_current_day'] = f"{sekarang.day}-{sekarang.month}-{sekarang.year}"
-            base_payload['orddd_lite_current_hour'] = sekarang.strftime("%H")
-            base_payload['orddd_lite_current_minute'] = sekarang.strftime("%M")
-            base_payload['orddd_lite_enable_time_slot'] = ''
-            base_payload['orddd_is_cart'] = ''
-            base_payload['orddd_lite_auto_populate_first_available_time_slot'] = ''
             base_payload['_wp_http_referer'] = '/?wc-ajax=update_order_review'
+            # ------------------------------------------------------
             
             checkout_url = "https://siliwangibolukukus.com/?wc-ajax=checkout"
             metode_pembayaran = ['cheque', 'cod']
