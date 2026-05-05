@@ -117,16 +117,16 @@ class SiliwangiEngine:
 
     async def _validate_kelipatan_12(self, keranjang):
         """Mengecek apakah total pesanan memenuhi syarat kelipatan 12."""
-        total_qty = sum(item['qty'] for item in keranjang)
-        sisa = total_qty % 12
-        logger.info(f"🧮 [{self.username}] Mengecek draf: Total item = {total_qty} pcs")
+        total_kue = sum(item['qty'] for item in keranjang if 'plastik' not in item['nama'].lower())
+        sisa = total_kue % 12
+        logger.info(f"🧮 [{self.username}] Mengecek draf: Total item = {total_kue} pcs")
         if sisa == 0:
-            logger.info(f"✅ [{self.username}] Total {total_qty} pcs memenuhi kelipatan 12. Aman!")
+            logger.info(f"✅ [{self.username}] Total {total_kue} pcs memenuhi kelipatan 12. Aman!")
             return True
         else:
             kekurangan = 12 - sisa
             logger.error(f"❌ [{self.username}] ATURAN KELIPATAN 12 DILANGGAR!")
-            logger.error(f"📝 [SOLUSI]: Total {total_qty} pcs. Kamu harus menambah {kekurangan} pcs, atau mengurangi {sisa} pcs.")
+            logger.error(f"📝 [SOLUSI]: Total {total_kue} pcs. Kamu harus menambah {kekurangan} pcs, atau mengurangi {sisa} pcs.")
             return False
 
     async def clear_cart(self):

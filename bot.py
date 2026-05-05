@@ -122,8 +122,8 @@ async def job_eksekusi():
     await bot.send_message(ADMIN_ID, laporan, parse_mode="Markdown")
     logger.info("War Selesai.")
 
-scheduler.add_job(job_pemanasan, 'cron', hour=7, minute=55, second=0)
-scheduler.add_job(job_eksekusi, 'cron', hour=8, minute=0, second=0)
+scheduler.add_job(job_pemanasan, 'cron', hour=9, minute=45, second=0)
+scheduler.add_job(job_eksekusi, 'cron', hour=9, minute=50, second=0)
 
 # ==========================================
 # FASE 2: DASBOR MULTI-AKUN (UI/UX)
