@@ -122,8 +122,8 @@ async def job_eksekusi():
     await bot.send_message(ADMIN_ID, laporan, parse_mode="Markdown")
     logger.info("War Selesai.")
 
-scheduler.add_job(job_pemanasan, 'cron', hour=9, minute=42, second=0)
-scheduler.add_job(job_eksekusi, 'cron', hour=9, minute=46, second=0)
+scheduler.add_job(job_pemanasan, 'cron', hour=7, minute=55, second=0)
+scheduler.add_job(job_eksekusi, 'cron', hour=8, minute=00, second=0)
 
 # ==========================================
 # FASE 2: DASBOR MULTI-AKUN (UI/UX)
@@ -132,7 +132,7 @@ def get_main_menu_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📦 Input Pesanan", callback_data="menu_order")],
         [InlineKeyboardButton(text="👥 Kelola Multi-Akun", callback_data="menu_akun")],
-        [InlineKeyboardButton(text="📝 Cek Draf & Kelola", callback_data="menu_kelola")],
+        [InlineKeyboardButton(text="📝 Pesanan & Kelola", callback_data="menu_kelola")],
         [InlineKeyboardButton(text="📊 Status", callback_data="menu_status")]
     ])
 
@@ -165,19 +165,18 @@ async def cb_menu_akun(callback: CallbackQuery):
     keyboard.append([InlineKeyboardButton(text="🔙 Kembali", callback_data="kembali_ke_menu")])
     
     teks = (
-        "👥 **Manajemen Multi-Akun**\n\n"
+        "👥 **Manajemen Akun**\n\n"
         "Klik nama akun di bawah ini untuk **menjadikannya Akun Aktif**, "
         "atau klik Tambah Akun Baru."
     )
     await callback.message.edit_text(teks, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard), parse_mode="Markdown")
 
 @router.callback_query(F.data.startswith("setacc:"))
-async def cb_setacc(callback: CallbackQuery):
+async def cb_setacc(callback: CallbackQuery, state: FSMContext): 
     target_acc = callback.data.split(":", 1)[1]
     set_active_account(str(callback.from_user.id), target_acc)
-    await callback.answer(f"✅ Kendali pindah ke: {target_acc}", show_alert=True)
-    # Refresh ke menu utama
-    await cb_kembali(callback, FSMContext)
+    await callback.answer(f"✅ Pindah ke Akun: {target_acc}", show_alert=True)
+    await cb_kembali(callback, state)
 
 @router.callback_query(F.data == "add_new_acc")
 async def cb_add_new_acc(callback: CallbackQuery, state: FSMContext):
