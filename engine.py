@@ -218,6 +218,11 @@ class SiliwangiEngine:
         return False
 
     async def execute_order(self):
+        logger.info(f"🔑 [{self.username}] Mengamankan sesi login...")
+        if not await self.login():
+            logger.error(f"🛑 [{self.username}] Gagal login!")
+            return False
+
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
         cursor.execute("SELECT id, payload_json FROM draft_orders WHERE telegram_id=? AND username=? AND status='PENDING' ORDER BY id DESC LIMIT 1", (self.telegram_id, self.username))
@@ -231,7 +236,7 @@ class SiliwangiEngine:
         
         # Validasi Kelipatan 12 diaktifkan sesuai aturan
         if not await self._validate_kelipatan_12(keranjang):
-            logger.error(f"🛑 [{self.username}] Draf ditolak otomatis sebelum masuk keranjang.")
+            logger.error(f"🛑 [{self.username}] Draf ditolak sebelum masuk keranjang.")
             return False
         
         await self.clear_cart()
