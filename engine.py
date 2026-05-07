@@ -89,6 +89,11 @@ class SiliwangiEngine:
             response = await self._safe_request('GET', url_account)
             if not response: return False
             
+            # [PERBAIKAN KRUSIAL] Cek apakah bot sebenarnya SUDAH login dari sesi pemanasan
+            if "Keluar" in response.text or "Logout" in response.text or "Pesanan" in response.text:
+                logger.info(f"✅ [{self.username}] Sesi login masih aktif! Lanjut ke eksekusi...")
+                return True
+                
             soup = BeautifulSoup(response.text, 'html.parser')
             nonce_field = soup.find('input', {'name': 'woocommerce-login-nonce'})
             
@@ -114,7 +119,7 @@ class SiliwangiEngine:
         except Exception as e:
             logger.error(f"Error saat login {self.username}: {str(e)}", exc_info=True)
             return False
-
+        
     async def _validate_kelipatan_12(self, keranjang):
         """Mengecek apakah total pesanan memenuhi syarat kelipatan 12."""
         total_kue = sum(item['qty'] for item in keranjang if 'plastik' not in item['nama'].lower())
