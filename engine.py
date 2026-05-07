@@ -167,21 +167,36 @@ class SiliwangiEngine:
             return False
 
     async def _add_to_cart(self, prod_id, qty):
-        payload = {"add-to-cart": prod_id, "quantity": qty}
+        url = "https://siliwangibolukukus.com/?wc-ajax=add_to_cart"
+        payload = {"product_id": str(prod_id), "quantity": str(qty)}
+        
         try:
-            res = await self._safe_request('POST', "https://siliwangibolukukus.com/cart/", data=payload)
+            res = await self._safe_request('POST', url, data=payload)
             if not res: return False
-            res_text_lower = res.text.lower()
+            
+            # 1. Coba baca respons mesin sebagai JSON (Jalur VIP WooCommerce)
+            try:
+                data = res.json()
+                if data.get('error'):
+                    logger.warning(f"🕵️ [INTEL STOK] Server menolak ID {prod_id}. Alasan: Habis / Limit.")
+                    return False
+                if 'fragments' in data or 'cart_hash' in data:
+                    return True
+            except Exception:
+                pass # Jika server ngambek dan tidak membalas JSON, lanjut ke Rencana B
+
+            # 2. RENCANA B (Fallback): Gunakan jalur GET klasik jika AJAX diblokir
+            url_get = f"https://siliwangibolukukus.com/?add-to-cart={prod_id}&quantity={qty}"
+            res_get = await self._safe_request('GET', url_get)
+            if not res_get: return False
+            
+            res_text_lower = res_get.text.lower()
             if "tidak dapat menambahkan" in res_text_lower or "out of stock" in res_text_lower or "sisa" in res_text_lower:
-                soup = BeautifulSoup(res.text, 'html.parser')
-                error_notices = soup.find_all(class_=['woocommerce-error', 'woocommerce-message', 'error', 'woocommerce-info'])
-                pesan_error = "Pesan tersembunyi (Tidak ditemukan di class standar)"
-                if error_notices:
-                    pesan_error = " | ".join([e.get_text(strip=True) for e in error_notices])
-                logger.warning(f"🕵️ [INTEL STOK] Akun: {self.username} | ID Produk: {prod_id} | Qty: {qty}")
-                logger.warning(f"📝 [PESAN SILIWANGI]: {pesan_error}")
+                logger.warning(f"🕵️ [INTEL STOK] Gagal via GET. ID: {prod_id} | Pesan: Out of stock")
                 return False
+                
             return True
+
         except Exception as e:
             logger.error(f"Error pada _add_to_cart [{self.username}]: {str(e)}")
             return False
