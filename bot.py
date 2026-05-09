@@ -12,12 +12,11 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# [UPDATE V2] Mengimpor fungsi database baru
 from database import (
     save_user_credentials, get_all_products_dict, simpan_draft_order,
     get_current_user, get_pending_order, delete_pending_order,
     get_all_accounts, set_active_account, get_all_pending_orders_multi,
-    get_order_history, init_db # [FITUR BARU] Mengambil riwayat order & inisialisasi DB
+    get_order_history, cleanup_all_pending_orders, init_db
 )
 from engine import SiliwangiEngine
 
@@ -46,12 +45,7 @@ class OrderState(StatesGroup):
 
 mesin_siaga = {} 
 
-# ==========================================
-# FASE 3 & 4: MULTI-ACCOUNT GATEKEEPER & PARALLEL EXECUTION
-# ==========================================
-
 async def eksekusi_dengan_jeda(engine, delay, username):
-    """Menunggu sebelum War"""
     if delay > 0:
         await asyncio.sleep(delay)
     
@@ -69,7 +63,6 @@ async def job_pemanasan():
 
     await bot.send_message(ADMIN_ID, f"⚙️ Terdeteksi {len(orders)} draf pesanan! Memulai pemanasan massal...")
     
-    # Menyiapkan pasukan (mesin) sebanyak jumlah draf akun
     mesin_siaga[ADMIN_ID] = {}
     berhasil_login = 0
     
@@ -90,44 +83,89 @@ async def job_pemanasan():
 async def job_eksekusi():
     logger.info("Mengecek jadwal (08:00)...")
     pasukan = mesin_siaga.get(ADMIN_ID, {})
-    
+
     if not pasukan:
         logger.info("🏖️ [MODE CUTI/GAGAL] Eksekusi dibatalkan.")
         return
 
     logger.info(f"🚀 MEMULAI WAR {len(pasukan)} AKUN!")
-    
-    # Mengumpulkan tugas tembakan dengan strategi Micro-Delay (0.3 detik antar akun)
-    tasks = []
-    jeda = 0.0
-    for username, engine in pasukan.items():
-        tasks.append(eksekusi_dengan_jeda(engine, jeda, username))
-        jeda += 1.5 # [PERBAIKAN] Jeda antar akun dinaikkan jadi 1.5 detik untuk hindari SQLite DB Locked
-        
-    # EKSEKUSI SEMUANYA SECARA BERSAMAAN (CONCURRENCY)
-    hasil_perang = await asyncio.gather(*tasks)
-    
-    # Membersihkan memori mesin & Rekap Laporan
-    laporan = "📊 **HASIL WAR 08:00 WIB:**\n\n"
-    for target_username, is_success in hasil_perang:
-        status = "✅ BERHASIL" if is_success else "❌ GAGAL/HABIS"
-        laporan += f"👤 `{target_username}`: {status}\n"
-        
-        # Tutup browser virtual untuk akun ini
-        engine = pasukan.get(target_username)
-        if engine: await engine.close()
-        
-    mesin_siaga.pop(ADMIN_ID, None)
-    
-    await bot.send_message(ADMIN_ID, laporan, parse_mode="Markdown")
-    logger.info("War Selesai.")
 
-scheduler.add_job(job_pemanasan, 'cron', hour=7, minute=55, second=0)
-scheduler.add_job(job_eksekusi, 'cron', hour=8, minute=00, second=0)
+    try:
+        tasks = []
+        jeda = 0.0
+        for username, engine in pasukan.items():
+            tasks.append(eksekusi_dengan_jeda(engine, jeda, username))
+            jeda += 1.5
 
-# ==========================================
-# FASE 2: DASBOR MULTI-AKUN (UI/UX)
-# ==========================================
+        hasil_perang = await asyncio.gather(*tasks)
+
+        laporan = "📊 **HASIL WAR 08:00 WIB:**\n\n"
+        for target_username, is_success in hasil_perang:
+            status = "✅ BERHASIL" if is_success else "❌ GAGAL/HABIS"
+            laporan += f"👤 `{target_username}`: {status}\n"
+
+            engine = pasukan.get(target_username)
+            if engine:
+                await engine.close()
+
+        mesin_siaga.pop(ADMIN_ID, None)
+        await bot.send_message(ADMIN_ID, laporan, parse_mode="Markdown")
+        logger.info("War Selesai.")
+
+    except Exception as e:
+        # ✅ Notifikasi fatal error ke Telegram agar admin segera tahu
+        pesan_error = (
+            f"🚨 **[FATAL ERROR] WAR CRASH!**\n\n"
+            f"Bot mengalami error kritis saat eksekusi war jam 08:00:\n"
+            f"`{type(e).__name__}: {str(e)[:300]}`\n\n"
+            f"Cek file `siliwangi_error.log` untuk detail lengkap."
+        )
+        logger.error(f"FATAL ERROR saat job_eksekusi: {e}", exc_info=True)
+        try:
+            await bot.send_message(ADMIN_ID, pesan_error, parse_mode="Markdown")
+        except Exception:
+            pass
+        # Pastikan semua engine ditutup meski terjadi error
+        for engine in pasukan.values():
+            try:
+                await engine.close()
+            except Exception:
+                pass
+        mesin_siaga.pop(ADMIN_ID, None)
+
+
+async def job_bersihkan_draft():
+    """
+    ✅ Job baru: Berjalan setiap jam 09:00 WIB.
+    Membersihkan semua draft PENDING yang tersisa setelah war selesai,
+    agar tidak terbawa ke war berikutnya.
+    """
+    logger.info("🧹 [09:00] Memulai cleanup draft otomatis...")
+    deleted = cleanup_all_pending_orders(str(ADMIN_ID))
+    mesin_siaga.pop(ADMIN_ID, None)  # Bersihkan juga cache engine
+
+    if deleted > 0:
+        pesan = (
+            f"🧹 **[CLEANUP 09:00]** Selesai!\n"
+            f"Dihapus **{deleted}** draft PENDING yang tersisa."
+        )
+        logger.info(f"🧹 Cleanup: {deleted} draft dihapus.")
+    else:
+        pesan = "🧹 **[CLEANUP 09:00]** Tidak ada draft tersisa. Bersih! ✨"
+        logger.info("🧹 Cleanup: Tidak ada draft tersisa.")
+
+    try:
+        await bot.send_message(ADMIN_ID, pesan, parse_mode="Markdown")
+    except Exception:
+        pass
+
+# ============================================================
+# JADWAL UTAMA
+# ============================================================
+scheduler.add_job(job_pemanasan,       'cron', hour=7,  minute=55, second=0)
+scheduler.add_job(job_eksekusi,        'cron', hour=8,  minute=0,  second=0)
+scheduler.add_job(job_bersihkan_draft, 'cron', hour=9,  minute=0,  second=0)  # ✅ Cleanup otomatis
+
 def get_main_menu_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📦 Input Pesanan", callback_data="menu_order")],
@@ -149,7 +187,6 @@ async def cmd_start(message: Message, state: FSMContext):
     )
     await message.answer(teks, reply_markup=get_main_menu_keyboard(), parse_mode="Markdown")
 
-# [FITUR BARU] Menu Manajemen Multi-Akun
 @router.callback_query(F.data == "menu_akun")
 async def cb_menu_akun(callback: CallbackQuery):
     accounts = get_all_accounts(str(callback.from_user.id))
@@ -157,7 +194,6 @@ async def cb_menu_akun(callback: CallbackQuery):
     
     for acc, is_active in accounts:
         status = "🟢" if is_active else "⚪"
-        # Memotong username jika terlalu panjang untuk tombol
         label = f"{status} {acc[:25]}..." if len(acc) > 25 else f"{status} {acc}"
         keyboard.append([InlineKeyboardButton(text=label, callback_data=f"setacc:{acc}")])
         
@@ -175,7 +211,6 @@ async def cb_menu_akun(callback: CallbackQuery):
 async def cb_setacc(callback: CallbackQuery, state: FSMContext): 
     target_acc = callback.data.split(":", 1)[1]
     
-    # akun yang aktif
     current_acc = get_current_user(str(callback.from_user.id))
     if target_acc == current_acc:
         await callback.answer(f"ℹ️ Akun {target_acc} sudah dalam posisi aktif.", show_alert=False)
@@ -190,7 +225,6 @@ async def cb_add_new_acc(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text("➕ **Tambah Akun**\nMasukan **Username/Email**:", parse_mode="Markdown")
     await state.set_state(AkunState.waiting_for_username)
 
-# [PERBAIKAN BUG] Pelindung Anti-Salah Ketik (Bug /daftar)
 @router.message(AkunState.waiting_for_username)
 async def process_username(message: Message, state: FSMContext):
     if message.text.startswith('/'):
@@ -217,8 +251,6 @@ async def process_password(message: Message, state: FSMContext):
 @router.callback_query(F.data == "menu_status")
 async def cb_menu_status(callback: CallbackQuery):
     now = datetime.now(zona_waktu).strftime("%d %B %Y, %H:%M:%S WIB")
-    
-    # Menghitung total orderan dari semua akun
     orders = get_all_pending_orders_multi(str(callback.from_user.id))
     total_draf = len(orders)
     status_order = f"{total_draf} PENDING ⏳" if total_draf > 0 else "KOSONG (Liburr 🏖️)"
@@ -227,7 +259,6 @@ async def cb_menu_status(callback: CallbackQuery):
     btn = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Kembali", callback_data="kembali_ke_menu")]])
     await callback.message.edit_text(teks, reply_markup=btn, parse_mode="Markdown")
 
-# [FITUR BARU] Modifikasi Menu Kelola & Tambah Tombol Riwayat
 @router.callback_query(F.data == "menu_kelola")
 async def cb_menu_kelola(callback: CallbackQuery):
     current_user = get_current_user(str(callback.from_user.id))
@@ -245,13 +276,11 @@ async def cb_menu_kelola(callback: CallbackQuery):
     else:
         teks = f"⭕ Tidak ada draf PENDING untuk akun **{current_user}**.\n\n*(Jika ingin melihat draf akun lain, ganti Akun Aktif di menu Kelola Multi-Akun)*"
 
-    # Menyisipkan Tombol Riwayat
     keyboard.append([InlineKeyboardButton(text="📜 Lihat Riwayat Order", callback_data="lihat_riwayat")])
     keyboard.append([InlineKeyboardButton(text="🔙 Kembali", callback_data="kembali_ke_menu")])
     
     await callback.message.edit_text(teks, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard), parse_mode="Markdown")
 
-# [FITUR BARU] Fungsi Membaca Riwayat dari Database
 @router.callback_query(F.data == "lihat_riwayat")
 async def cb_lihat_riwayat(callback: CallbackQuery):
     current_user = get_current_user(str(callback.from_user.id))
@@ -313,21 +342,22 @@ async def cb_menu_order(callback: CallbackQuery, state: FSMContext):
         "- 50x MAXI Belgian Chocolate\n"
         "- 50x MAXI Black Forest\n"
         "- 15x MAXI Cokelat Dubai Pistachio\n"
-        "- 14x MAXI Cokelat Tiramisu\n"
-        "- 8x MAXI Brownies Coklat\n"
+        "- 10x MAXI Cokelat Tiramisu\n"
+        "- 10x MAXI Brownies Coklat\n"
         "- 6x MAXI Susu Lembang\n"
-        "- 3x MAXI Alpukat Mentega\n"
+        "- 2x MAXI Alpukat Mentega\n"
         "- 2x MAXI Talas Bogor\n"
         "- 8x MAXI Pandan Wangi\n"
         "- 8x MAXI Red Velvet\n"
         "- 1x MAXI Keju Cheddar\n"
         "- 3x MAXI Durian Musang King\n"
         "- 1x MAXI Mangga Indramayu\n"
-        "- 3x MAXI Original Lapis\n"
+        "- 2x MAXI Original Lapis\n"
         "- 0x DC Belgian Chocolate\n"
         "- 0x DC Black Forest\n"
-        "- 50x Plastik Bolu Klasik HD Isi 3 Box\n\n"
-"*(Catatan: Hapus baris yang tidak perlu, atau cukup jadikan 0x)*"
+        "- 50x Plastik Bolu Klasik HD Isi 3 Box\n"
+        "- 0x Plastik Bakpia Kukus HD Isi 3 Box\n\n"
+        "*(Catatan: Hapus baris yang tidak perlu, atau cukup jadikan 0x)*"
     )
     await callback.message.edit_text(template, parse_mode="Markdown")
     await state.set_state(OrderState.waiting_for_template)
@@ -363,6 +393,7 @@ async def process_template(message: Message, state: FSMContext):
         await message.answer("⚠️ Keranjang kosong. Pastikan format teks sudah benar.")
         return
 
+    # === VALIDASI MINIMAL ORDER (GABUNGAN) ===
     total_kue = sum(item['qty'] for item in keranjang if item['kategori'] in ['MAXI', 'DC'])
     if total_kue < 50:
         await message.answer(
@@ -371,14 +402,27 @@ async def process_template(message: Message, state: FSMContext):
         )
         return
 
-    sisa = total_maxi % 12
-    if sisa != 0:
+    # === VALIDASI KELIPATAN MAXI (12) ===
+    total_maxi_cek = sum(item['qty'] for item in keranjang if item['kategori'] == 'MAXI')
+    if total_maxi_cek > 0 and total_maxi_cek % 12 != 0:
+        sisa = total_maxi_cek % 12
         kurang, tambah = sisa, 12 - sisa
         await message.answer(
-            f"⚠️ **PERINGATAN KELIPATAN 12**\nTotal MAXI kamu: **{total_maxi} pcs**.\n\n⬇️ Kurangi **{kurang}** agar menjadi **{total_maxi - kurang}**.\n⬆️ Atau Tambah **{tambah}** agar menjadi **{total_maxi + tambah}**.",
+            f"⚠️ **PERINGATAN KELIPATAN MAXI**\nTotal MAXI kamu: **{total_maxi_cek} pcs**.\n(Wajib kelipatan 12)\n\n⬇️ Kurangi **{kurang}** atau Tambah **{tambah}**.",
             parse_mode="Markdown"
         )
         return 
+
+    # === VALIDASI KELIPATAN DC (4) ===
+    total_dc = sum(item['qty'] for item in keranjang if item['kategori'] == 'DC')
+    if total_dc > 0 and total_dc % 4 != 0:
+        sisa = total_dc % 4
+        kurang, tambah = sisa, 4 - sisa
+        await message.answer(
+            f"⚠️ **PERINGATAN KELIPATAN DC**\nTotal Dessert Cake kamu: **{total_dc} pcs**.\n(Wajib kelipatan 4)\n\n⬇️ Kurangi **{kurang}** atau Tambah **{tambah}**.",
+            parse_mode="Markdown"
+        )
+        return
 
     delete_pending_order(str(message.from_user.id))
     simpan_draft_order(str(message.from_user.id), total_maxi, keranjang)
@@ -390,7 +434,6 @@ async def process_template(message: Message, state: FSMContext):
 
 @router.callback_query(F.data == "kembali_ke_menu")
 async def cb_kembali(callback: CallbackQuery, state: FSMContext):
-    # Digunakan state.clear() tapi kita buat aman dengan type check
     if hasattr(state, 'clear'):
         await state.clear()
         
@@ -402,7 +445,6 @@ async def cb_kembali(callback: CallbackQuery, state: FSMContext):
         f"🟢 **Akun Aktif:** `{status_akun}`\n\n"
         f"*(Input pesanan akan otomatis masuk ke Akun Aktif)*"
     )
-    # Gunakan try/except untuk menghindari error 'Message is not modified' jika UI tidak berubah
     try:
         await callback.message.edit_text(teks, reply_markup=get_main_menu_keyboard(), parse_mode="Markdown")
     except Exception:
@@ -410,11 +452,10 @@ async def cb_kembali(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 async def main():
-    init_db() # [PERBAIKAN] Membuat tabel DB jika belum ada di LXC
+    init_db() 
     dp.include_router(router)
     scheduler.start()
     
-    # TAMBAHKAN BARIS INI UNTUK MENYAPU ANTREAN TELEGRAM
     await bot.delete_webhook(drop_pending_updates=True)
     
     print("🚀 Bot JAGO Ready...")

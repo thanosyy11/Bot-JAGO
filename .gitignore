@@ -1,5 +1,8 @@
 .env
+!.env.example
 .emyu/
 siliwangi_bot.db
 siliwangi_error.log
 __pycache__/
+snapshot_*.html
+*.pyc

@@ -4,3 +4,4 @@ beautifulsoup4
 apscheduler
 pytz
 python-dotenv
+cryptography

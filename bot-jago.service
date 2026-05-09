@@ -1,0 +1,27 @@
+[Unit]
+Description=Bot JAGO — Siliwangi War Bot
+Documentation=https://github.com/thanosyy11/Bot-JAGO
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/Bot-JAGO
+
+# Gunakan Python dari virtual environment
+ExecStart=/opt/Bot-JAGO/.emyu/bin/python /opt/Bot-JAGO/bot.py
+
+# Restart otomatis jika bot crash, dengan jeda 10 detik
+Restart=always
+RestartSec=10
+
+# Log stdout & stderr ke file terpisah
+StandardOutput=append:/var/log/bot-jago.log
+StandardError=append:/var/log/bot-jago.log
+
+# Batas resource
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
