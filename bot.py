@@ -24,8 +24,9 @@ logging.basicConfig(filename='siliwangi_error.log', level=logging.INFO, format='
 logger = logging.getLogger(__name__)
 
 load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID"))
+BOT_TOKEN  = os.getenv("BOT_TOKEN")
+ADMIN_ID   = int(os.getenv("ADMIN_ID"))
+DRY_RUN_MODE = os.getenv("DRY_RUN", "false").lower() == "true"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -45,13 +46,13 @@ class OrderState(StatesGroup):
 
 mesin_siaga = {} 
 
-async def eksekusi_dengan_jeda(engine, delay, username):
+async def eksekusi_dengan_jeda(engine, delay, username, dry_run=False):
     if delay > 0:
         await asyncio.sleep(delay)
-    
-    logger.info(f"🔫 akun: {username} (Delay: {delay}s)")
-    hasil = await engine.execute_order()
-    return username, hasil
+
+    logger.info(f"{'[DRY RUN]' if dry_run else '[WAR]'} akun: {username} (Delay: {delay}s)")
+    hasil = await engine.execute_order(dry_run=dry_run)
+    return username, hasil, engine.step_log
 
 async def job_pemanasan():
     logger.info("Warm Up (07:55)...")
@@ -94,29 +95,50 @@ async def job_eksekusi():
         tasks = []
         jeda = 0.0
         for username, engine in pasukan.items():
-            tasks.append(eksekusi_dengan_jeda(engine, jeda, username))
+            tasks.append(eksekusi_dengan_jeda(engine, jeda, username, dry_run=DRY_RUN_MODE))
             jeda += 1.5
 
         hasil_perang = await asyncio.gather(*tasks)
 
-        laporan = "📊 **HASIL WAR 08:00 WIB:**\n\n"
-        for target_username, is_success in hasil_perang:
-            status = "✅ BERHASIL" if is_success else "❌ GAGAL/HABIS"
-            laporan += f"👤 `{target_username}`: {status}\n"
+        if DRY_RUN_MODE:
+            # ─── Laporan DRY RUN: detail tiap langkah ───────────────────────
+            laporan = (
+                f"🧪 **[DRY RUN] LAPORAN SIMULASI 08:00 WIB**\n"
+                f"_{len(pasukan)} akun diuji — checkout TIDAK dieksekusi_\n\n"
+            )
+            for target_username, is_success, step_log in hasil_perang:
+                status_icon = "✅" if is_success else "❌"
+                laporan += f"{'─'*30}\n"
+                laporan += f"👤 `{target_username}` {status_icon}\n"
+                for baris in step_log:
+                    laporan += f"  {baris}\n"
+                laporan += "\n"
 
+            laporan += (
+                f"{'─'*30}\n"
+                f"💡 Jika semua langkah ✅, ganti `DRY_RUN=false` di `.env`\n"
+                f"   lalu restart bot untuk war sesungguhnya."
+            )
+        else:
+            # ─── Laporan WAR biasa ───────────────────────────────────────────
+            laporan = "📊 **HASIL WAR 08:00 WIB:**\n\n"
+            for target_username, is_success, step_log in hasil_perang:
+                status = "✅ BERHASIL" if is_success else "❌ GAGAL/HABIS"
+                laporan += f"👤 `{target_username}`: {status}\n"
+
+        for target_username, is_success, step_log in hasil_perang:
             engine = pasukan.get(target_username)
             if engine:
                 await engine.close()
 
         mesin_siaga.pop(ADMIN_ID, None)
         await bot.send_message(ADMIN_ID, laporan, parse_mode="Markdown")
-        logger.info("War Selesai.")
+        logger.info("War/DryRun Selesai.")
 
     except Exception as e:
-        # ✅ Notifikasi fatal error ke Telegram agar admin segera tahu
         pesan_error = (
-            f"🚨 **[FATAL ERROR] WAR CRASH!**\n\n"
-            f"Bot mengalami error kritis saat eksekusi war jam 08:00:\n"
+            f"🚨 **[FATAL ERROR] {'DRY RUN' if DRY_RUN_MODE else 'WAR'} CRASH!**\n\n"
+            f"Bot mengalami error kritis saat eksekusi jam 08:00:\n"
             f"`{type(e).__name__}: {str(e)[:300]}`\n\n"
             f"Cek file `siliwangi_error.log` untuk detail lengkap."
         )
@@ -136,7 +158,7 @@ async def job_eksekusi():
 
 async def job_bersihkan_draft():
     """
-    ✅ Job baru: Berjalan setiap jam 09:00 WIB.
+    Job berjalan setiap jam 09:00 WIB.
     Membersihkan semua draft PENDING yang tersisa setelah war selesai,
     agar tidak terbawa ke war berikutnya.
     """

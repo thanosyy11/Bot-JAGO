@@ -30,6 +30,7 @@ class SiliwangiEngine:
         self.checkout_nonce = None
         self.security_nonce = None   # nonce untuk update_order_review
         self.order_id = None
+        self.step_log = []           # Log tiap langkah untuk laporan dry run
 
         # ============================================================
         # User-Agent disesuaikan dengan record tracking (Chromium 145)
@@ -46,6 +47,18 @@ class SiliwangiEngine:
             follow_redirects=True,
             timeout=20.0
         )
+
+    # ------------------------------------------------------------------
+    # STEP LOGGER (untuk laporan dry run)
+    # ------------------------------------------------------------------
+
+    def _step(self, icon: str, nama: str, detail: str = ""):
+        """Catat satu langkah ke step_log dan ke file log."""
+        baris = f"{icon} {nama}"
+        if detail:
+            baris += f" → {detail}"
+        self.step_log.append(baris)
+        logger.info(f"[STEP] [{self.username}] {baris}")
 
     # ------------------------------------------------------------------
     # UTILITAS
@@ -428,11 +441,17 @@ class SiliwangiEngine:
     # EKSEKUSI ORDER (main flow)
     # ------------------------------------------------------------------
 
-    async def execute_order(self):
+    async def execute_order(self, dry_run: bool = False):
+        """Eksekusi order lengkap. Jika dry_run=True, berhenti sebelum POST checkout."""
+        self.step_log = []  # Reset log setiap eksekusi
+        self._step("🔑", "Memulai", "dry run" if dry_run else "WAR")
+
         logger.info(f"🔑 [{self.username}] Mengamankan sesi login...")
         if not await self.login():
+            self._step("❌", "Login", "GAGAL")
             logger.error(f"🛑 [{self.username}] Gagal login!")
             return False
+        self._step("✅", "Login", "Sesi aktif")
 
         conn = sqlite3.connect(DB_NAME, timeout=10)
         cursor = conn.cursor()
@@ -457,20 +476,35 @@ class SiliwangiEngine:
             return False
 
         await self.clear_cart()
+        self._step("🧹", "Clear Cart", "Selesai")
+
 
         for item in keranjang:
-            await self.add_to_cart_with_fallback(item)
+            ok = await self.add_to_cart_with_fallback(item)
+            nama_item = item['nama']
+            qty_item  = item['qty']
+            if ok:
+                self._step("🛒", f"{qty_item}x {nama_item}", "Masuk")
+            else:
+                self._step("⚠️", f"{qty_item}x {nama_item}", "HABIS/GAGAL")
 
         if not await self.get_checkout_nonce():
+            self._step("❌", "Checkout Nonce", "Tidak ditemukan")
             return False
+        self._step("🔐", "Checkout Nonce", f"{self.checkout_nonce[:8]}..." if self.checkout_nonce else "N/A")
+        self._step(
+            "🔐" if self.security_nonce else "⚠️",
+            "Security Nonce",
+            f"{self.security_nonce[:8]}..." if self.security_nonce else "Tidak ditemukan (update_order_review dilewati)"
+        )
 
-        return await self._process_checkout()
+        return await self._process_checkout(dry_run=dry_run)
 
     # ------------------------------------------------------------------
     # PROSES CHECKOUT
     # ------------------------------------------------------------------
 
-    async def _process_checkout(self):
+    async def _process_checkout(self, dry_run: bool = False):
         try:
             # 1) Verifikasi keranjang tidak kosong
             cart_res = await self._safe_request('GET', "https://siliwangibolukukus.com/cart/")
@@ -545,6 +579,25 @@ class SiliwangiEngine:
 
             # 4) ✅ Panggil update_order_review sebelum checkout final (sesuai record)
             await self._call_update_order_review(base_payload)
+            self._step(
+                "✅" if self.security_nonce else "⚠️",
+                "update_order_review",
+                "Berhasil" if self.security_nonce else "Dilewati (nonce tidak ada)"
+            )
+
+            # ── DRY RUN: berhenti di sini, jangan POST ke /checkout ────────────
+            if dry_run:
+                self._step("🧪", "DRY RUN", "Berhenti sebelum POST checkout")
+                checkout_nonce_preview = self.checkout_nonce[:8] + "..." if self.checkout_nonce else "N/A"
+                security_preview = self.security_nonce[:8] + "..." if self.security_nonce else "N/A"
+                self._step("📋", "Payload Siap",
+                    f"payment={base_payload.get('payment_method')} | "
+                    f"checkout_nonce={checkout_nonce_preview} | "
+                    f"security={security_preview} | "
+                    f"tanggal={base_payload.get('h_deliverydate', '?')}"
+                )
+                logger.info(f"🧪 [{self.username}] DRY RUN selesai — checkout TIDAK dieksekusi.")
+                return True  # Sukses dry run
 
             # 5) POST checkout final — hanya metode 'cheque' (sesuai record)
             checkout_url = "https://siliwangibolukukus.com/?wc-ajax=checkout"
