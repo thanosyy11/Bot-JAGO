@@ -174,8 +174,15 @@ async def cb_menu_akun(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("setacc:"))
 async def cb_setacc(callback: CallbackQuery, state: FSMContext): 
     target_acc = callback.data.split(":", 1)[1]
+    
+    # akun yang aktif
+    current_acc = get_current_user(str(callback.from_user.id))
+    if target_acc == current_acc:
+        await callback.answer(f"ℹ️ Akun {target_acc} sudah dalam posisi aktif.", show_alert=False)
+        return
+        
     set_active_account(str(callback.from_user.id), target_acc)
-    await callback.answer(f"✅ Pindah ke Akun: {target_acc}", show_alert=True)
+    await callback.answer(f"✅ Kendali pindah ke: {target_acc}", show_alert=True)
     await cb_kembali(callback, state)
 
 @router.callback_query(F.data == "add_new_acc")

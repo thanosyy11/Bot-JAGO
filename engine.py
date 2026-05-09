@@ -249,7 +249,9 @@ class SiliwangiEngine:
         row = cursor.fetchone()
         conn.close()
         
-        if not row: return False
+        if not row: 
+            logger.error(f"🛑 [{self.username}] Draf KOSONG/HILANG dari database saat eksekusi!")
+            return False
         
         self.order_id, payload_json = row
         keranjang = json.loads(payload_json)
