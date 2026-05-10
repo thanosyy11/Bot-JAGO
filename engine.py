@@ -10,7 +10,12 @@ import pytz
 import logging
 import os
 
-from database import decrypt_password
+from database import (
+    decrypt_password,
+    load_session_cookies,
+    save_session_cookies,
+    clear_session_cookies,
+)
 
 logging.basicConfig(
     filename='siliwangi_error.log',
@@ -28,9 +33,9 @@ class SiliwangiEngine:
         self.username = username
         self.password = None
         self.checkout_nonce = None
-        self.security_nonce = None   # nonce untuk update_order_review
+        self.security_nonce = None
         self.order_id = None
-        self.step_log = []           # Log tiap langkah untuk laporan dry run
+        self.step_log = []
 
         # ============================================================
         # User-Agent disesuaikan dengan record tracking (Chromium 145)
@@ -47,6 +52,8 @@ class SiliwangiEngine:
             follow_redirects=True,
             timeout=20.0
         )
+
+        self._load_saved_cookies()
 
     # ------------------------------------------------------------------
     # STEP LOGGER (untuk laporan dry run)
@@ -71,7 +78,7 @@ class SiliwangiEngine:
             nama_file = f"snapshot_{nama_kejadian}_{username_pendek}_{waktu_sekarang}.html"
             with open(nama_file, 'w', encoding='utf-8') as file:
                 file.write(html_text)
-            logger.info(f"📸 SNAPSHOT TERSIMPAN: '{nama_file}'")
+            logger.info(f"📸 Screenshot Tersimpan: '{nama_file}'")
         except Exception as e:
             logger.error(f"Gagal menyimpan snapshot HTML: {e}")
 
@@ -107,10 +114,38 @@ class SiliwangiEngine:
         row = cursor.fetchone()
         conn.close()
         if row:
-            # Dekripsi password (dengan fallback plaintext untuk migrasi)
             self.password = decrypt_password(row[0])
             return True
         return False
+
+    # ------------------------------------------------------------------
+    # SESSION MANAGEMENT
+    # ------------------------------------------------------------------
+
+    def _load_saved_cookies(self):
+        """Muat cookies tersimpan dari DB ke httpx client."""
+        saved = load_session_cookies(self.telegram_id, self.username)
+        if saved:
+            for name, value in saved.items():
+                self.client.cookies.set(name, value)
+            logger.info(f"🔑 [{self.username}] {len(saved)} cookies dimuat dari DB.")
+
+    def _session_is_valid(self) -> bool:
+        """Cek apakah client sudah punya cookies login WooCommerce aktif."""
+        return any(
+            'wordpress_logged_in' in k or 'wordpress_sec' in k
+            for k in dict(self.client.cookies).keys()
+        )
+
+    def _save_cookies(self):
+        """Simpan cookies httpx saat ini ke DB."""
+        try:
+            cookies_dict = {k: v for k, v in self.client.cookies.items()}
+            if cookies_dict:
+                save_session_cookies(self.telegram_id, self.username, cookies_dict)
+                logger.info(f"💾 [{self.username}] {len(cookies_dict)} cookies disimpan ke DB.")
+        except Exception as e:
+            logger.warning(f"⚠️ Gagal simpan cookies [{self.username}]: {e}")
 
     # ------------------------------------------------------------------
     # LOGIN
@@ -127,10 +162,15 @@ class SiliwangiEngine:
             if not response:
                 return False
 
-            # Cek apakah sesi masih aktif
+            # Cek apakah sesi masih aktif (via cookies tersimpan)
             if "Keluar" in response.text or "Logout" in response.text or "Pesanan" in response.text:
-                logger.info(f"✅ [{self.username}] Sesi masih aktif, lanjut eksekusi.")
+                logger.info(f"✅ [{self.username}] Sesi masih aktif (cookies).")
+                self._save_cookies()
                 return True
+
+            # Session expired → clear lama, fresh login
+            logger.info(f"🔐 [{self.username}] Session expired, login ulang...")
+            clear_session_cookies(self.telegram_id, self.username)
 
             soup = BeautifulSoup(response.text, 'html.parser')
             nonce_field = soup.find('input', {'name': 'woocommerce-login-nonce'})
@@ -147,7 +187,8 @@ class SiliwangiEngine:
             }
             login_res = await self._safe_request('POST', url_account, data=payload)
             if login_res and ("Keluar" in login_res.text or "Logout" in login_res.text):
-                logger.info(f"✅ Login sukses: {self.username}")
+                logger.info(f"✅ Login sukses (fresh): {self.username}")
+                self._save_cookies()
                 return True
             else:
                 logger.warning(f"❌ Login gagal: {self.username}")
@@ -158,6 +199,7 @@ class SiliwangiEngine:
         except Exception as e:
             logger.error(f"Error saat login {self.username}: {e}", exc_info=True)
             return False
+
 
     # ------------------------------------------------------------------
     # VALIDASI KELIPATAN

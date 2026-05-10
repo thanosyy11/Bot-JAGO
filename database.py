@@ -8,13 +8,7 @@ logger = logging.getLogger(__name__)
 
 DB_NAME = "siliwangi_bot.db"
 
-# ============================================================
-# ENKRIPSI PASSWORD (Fernet)
-# Buat key sekali: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-# Simpan hasilnya ke .env sebagai ENCRYPTION_KEY=...
-# ============================================================
 def _get_fernet():
-    """Mendapatkan instance Fernet dari ENCRYPTION_KEY di .env."""
     key = os.getenv("ENCRYPTION_KEY")
     if not key:
         raise RuntimeError(
@@ -25,7 +19,6 @@ def _get_fernet():
     return Fernet(key.encode())
 
 def encrypt_password(plaintext: str) -> str:
-    """Mengenkripsi password sebelum disimpan ke database."""
     try:
         f = _get_fernet()
         return f.encrypt(plaintext.encode()).decode()
@@ -34,12 +27,10 @@ def encrypt_password(plaintext: str) -> str:
         raise
 
 def decrypt_password(encrypted: str) -> str:
-    """Mendekripsi password dari database. Fallback ke plaintext jika gagal (migrasi)."""
     try:
         f = _get_fernet()
         return f.decrypt(encrypted.encode()).decode()
     except Exception:
-        # Fallback untuk password lama yang masih plaintext (backward compat)
         logger.warning("⚠️ Dekripsi gagal — password mungkin masih plaintext (belum dimigrasi).")
         return encrypted
 
@@ -95,14 +86,19 @@ def init_db():
         )
     ''')
 
-    # ============================================================
-    # DATA PRODUK
-    # Format: (product_id, nama_tampilan, kategori, tier)
-    # Tier 0 = tidak ada fallback (misal: kemasan/plastik)
-    # Tier 1,2,3 = ada fallback ke tier terdekat
-    # ============================================================
+    # Tabel sessions — simpan cookies httpx per akun untuk resume tanpa login ulang
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS sessions (
+            telegram_id TEXT,
+            username    TEXT,
+            cookies_json TEXT,
+            saved_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (telegram_id, username)
+        )
+    ''')
+
     products = [
-        # === MAXI Tier 1 (produk paling laris / utama) ===
+        # === MAXI Tier 1 ===
         (13463,  "MAXI Belgian Chocolate",       "MAXI", 1),
         (13465,  "MAXI Black Forest",             "MAXI", 1),
         (227187, "MAXI Cokelat Dubai Pistachio",  "MAXI", 1),
@@ -124,13 +120,11 @@ def init_db():
         # === Dessert Cake (DC) Tier 1 ===
         (65017,  "DC Belgian Chocolate",          "DC",   1),
         (65022,  "DC Black Forest",               "DC",   1),
-        # === Kemasan / Plastik (Tier 0 = tidak ada fallback otomatis) ===
+        # === Kemasan ===
         (70867,  "Plastik Bolu Klasik HD Isi 3 Box",  "PLASTIK", 0),
         (137748, "Plastik Bakpia Kukus HD Isi 3 Box",  "PLASTIK", 0),
     ]
 
-    # ── Migrasi: hapus entry lama yang salah ─────────────────────────────────
-    # ID 85922 (Plastik Bakpia, ID lama) & nama "(Alt)" tidak lagi dipakai.
     cursor.execute("DELETE FROM products WHERE id = 85922")
     cursor.execute("DELETE FROM products WHERE nama LIKE '%Alt%' AND kategori = 'PLASTIK'")
 
@@ -144,13 +138,6 @@ def init_db():
     conn.close()
     print("[OK] Database berhasil diinisialisasi & dimigrasi")
 
-
-
-
-
-# ============================================================
-# CRUD USERS
-# ============================================================
 
 def save_user_credentials(telegram_id, username, password):
     """Menyimpan kredensial dengan password terenkripsi."""
@@ -190,6 +177,84 @@ def set_active_account(telegram_id, target_username):
     conn.commit()
     conn.close()
 
+
+# ============================================================
+# SESSION MANAGEMENT (cookies per akun)
+# ============================================================
+
+def save_session_cookies(telegram_id: str, username: str, cookies: dict):
+    """Simpan cookies httpx ke DB agar bot tidak perlu login ulang setelah restart."""
+    conn = sqlite3.connect(DB_NAME, timeout=10)
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT OR REPLACE INTO sessions (telegram_id, username, cookies_json, saved_at)
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+    ''', (telegram_id, username, json.dumps(cookies)))
+    conn.commit()
+    conn.close()
+
+def load_session_cookies(telegram_id: str, username: str) -> dict:
+    """Ambil cookies tersimpan. Return dict kosong jika belum ada."""
+    conn = sqlite3.connect(DB_NAME, timeout=10)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT cookies_json FROM sessions WHERE telegram_id=? AND username=?",
+        (telegram_id, username)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if row and row[0]:
+        try:
+            return json.loads(row[0])
+        except Exception:
+            return {}
+    return {}
+
+def clear_session_cookies(telegram_id: str, username: str):
+    """Hapus session (saat logout manual atau session expired)."""
+    conn = sqlite3.connect(DB_NAME, timeout=10)
+    cursor = conn.cursor()
+    cursor.execute(
+        "DELETE FROM sessions WHERE telegram_id=? AND username=?",
+        (telegram_id, username)
+    )
+    conn.commit()
+    conn.close()
+
+def get_session_status(telegram_id: str, username: str) -> bool:
+    """Cek apakah akun punya session cookies tersimpan."""
+    cookies = load_session_cookies(telegram_id, username)
+    return bool(cookies)
+
+def get_all_accounts_with_status(telegram_id: str) -> list:
+    """
+    Return list of (username, is_active, has_session).
+    Digunakan di menu akun untuk tampilkan status login setiap akun.
+    """
+    conn = sqlite3.connect(DB_NAME, timeout=10)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT username, is_active FROM users WHERE telegram_id = ? ORDER BY is_active DESC, username ASC",
+        (telegram_id,)
+    )
+    rows = cursor.fetchall()
+    # Cek session per akun
+    cursor.execute(
+        "SELECT username FROM sessions WHERE telegram_id = ?",
+        (telegram_id,)
+    )
+    session_users = {r[0] for r in cursor.fetchall()}
+    conn.close()
+    return [(u, is_active, u in session_users) for u, is_active in rows]
+
+def count_accounts(telegram_id: str) -> int:
+    """Hitung jumlah akun terdaftar."""
+    conn = sqlite3.connect(DB_NAME, timeout=10)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM users WHERE telegram_id=?", (telegram_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else 0
 
 # ============================================================
 # CRUD DRAFT ORDERS

@@ -2,6 +2,7 @@ import asyncio
 import os
 import json
 import logging
+import random
 import pytz
 from datetime import datetime
 from dotenv import load_dotenv
@@ -16,7 +17,8 @@ from database import (
     save_user_credentials, get_all_products_dict, simpan_draft_order,
     get_current_user, get_pending_order, delete_pending_order,
     get_all_accounts, set_active_account, get_all_pending_orders_multi,
-    get_order_history, cleanup_all_pending_orders, init_db
+    get_order_history, cleanup_all_pending_orders, init_db,
+    get_all_accounts_with_status, count_accounts, clear_session_cookies
 )
 from engine import SiliwangiEngine
 
@@ -50,7 +52,7 @@ async def eksekusi_dengan_jeda(engine, delay, username, dry_run=False):
     if delay > 0:
         await asyncio.sleep(delay)
 
-    logger.info(f"{'[DRY RUN]' if dry_run else '[WAR]'} akun: {username} (Delay: {delay}s)")
+    logger.info(f"{'[DRY RUN]' if dry_run else '[WAR]'} akun: {username} (Delay: {delay:.1f}s)")
     hasil = await engine.execute_order(dry_run=dry_run)
     return username, hasil, engine.step_log
 
@@ -96,7 +98,8 @@ async def job_eksekusi():
         jeda = 0.0
         for username, engine in pasukan.items():
             tasks.append(eksekusi_dengan_jeda(engine, jeda, username, dry_run=DRY_RUN_MODE))
-            jeda += 1.5
+            # Delay random 2.0-3.5 detik antar akun (lebih manusiawi, hindari spam)
+            jeda += random.uniform(2.0, 3.5)
 
         hasil_perang = await asyncio.gather(*tasks)
 
@@ -211,41 +214,106 @@ async def cmd_start(message: Message, state: FSMContext):
 
 @router.callback_query(F.data == "menu_akun")
 async def cb_menu_akun(callback: CallbackQuery):
-    accounts = get_all_accounts(str(callback.from_user.id))
+    accounts = get_all_accounts_with_status(str(callback.from_user.id))
     keyboard = []
-    
-    for acc, is_active in accounts:
-        status = "🟢" if is_active else "⚪"
-        label = f"{status} {acc[:25]}..." if len(acc) > 25 else f"{status} {acc}"
+
+    for acc, is_active, has_session in accounts:
+        # Ikon: 🟢 aktif+session | 🔑 session ada | ⚪ belum login
+        if is_active and has_session:
+            icon = "🟢🔑"
+        elif is_active:
+            icon = "🟢"
+        elif has_session:
+            icon = "🔑"
+        else:
+            icon = "⚪"
+
+        label = f"{icon} {acc[:22]}..." if len(acc) > 25 else f"{icon} {acc}"
         keyboard.append([InlineKeyboardButton(text=label, callback_data=f"setacc:{acc}")])
-        
+
     keyboard.append([InlineKeyboardButton(text="➕ Tambah Akun Baru", callback_data="add_new_acc")])
+    keyboard.append([InlineKeyboardButton(text="🔑 Login Semua Sekarang", callback_data="login_all_now")])
+    keyboard.append([InlineKeyboardButton(text="🗑️ Reset Session Akun Ini", callback_data="reset_session")])
     keyboard.append([InlineKeyboardButton(text="🔙 Kembali", callback_data="kembali_ke_menu")])
-    
+
+    total = len(accounts)
     teks = (
-        "👥 **Manajemen Akun**\n\n"
-        "Klik nama akun di bawah ini untuk **menjadikannya Akun Aktif**, "
-        "atau klik Tambah Akun Baru."
+        f"👥 **Manajemen Akun** ({total}/10)\n\n"
+        f"🟢🔑 = Aktif + Session\n"
+        f"🔑 = Session tersimpan\n"
+        f"⚪ = Belum login\n\n"
+        "Klik akun untuk jadikan **Akun Aktif** (untuk input pesanan)."
     )
     await callback.message.edit_text(teks, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard), parse_mode="Markdown")
 
 @router.callback_query(F.data.startswith("setacc:"))
-async def cb_setacc(callback: CallbackQuery, state: FSMContext): 
+async def cb_setacc(callback: CallbackQuery, state: FSMContext):
     target_acc = callback.data.split(":", 1)[1]
-    
+
     current_acc = get_current_user(str(callback.from_user.id))
     if target_acc == current_acc:
-        await callback.answer(f"ℹ️ Akun {target_acc} sudah dalam posisi aktif.", show_alert=False)
+        await callback.answer(f"ℹ️ {target_acc} sudah aktif.", show_alert=False)
         return
-        
+
     set_active_account(str(callback.from_user.id), target_acc)
     await callback.answer(f"✅ Kendali pindah ke: {target_acc}", show_alert=True)
     await cb_kembali(callback, state)
 
 @router.callback_query(F.data == "add_new_acc")
 async def cb_add_new_acc(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("➕ **Tambah Akun**\nMasukan **Username/Email**:", parse_mode="Markdown")
+    total = count_accounts(str(callback.from_user.id))
+    if total >= 10:
+        await callback.answer(
+            "⛔ Maksimal 10 akun. Hapus salah satu sebelum menambah.",
+            show_alert=True
+        )
+        return
+    await callback.message.edit_text(
+        f"➕ **Tambah Akun** ({total}/10)\nMasukan **Username/Email**:",
+        parse_mode="Markdown"
+    )
     await state.set_state(AkunState.waiting_for_username)
+
+@router.callback_query(F.data == "login_all_now")
+async def cb_login_all_now(callback: CallbackQuery):
+    """Login manual semua akun yang punya draf, tanpa menunggu jam 07:55."""
+    await callback.answer()
+    orders = get_all_pending_orders_multi(str(callback.from_user.id))
+    if not orders:
+        await callback.message.answer("⚠️ Tidak ada draf pesanan. Tambah pesanan dulu.")
+        return
+
+    await callback.message.answer(f"🔐 Memulai login {len(orders)} akun...")
+    mesin_siaga[ADMIN_ID] = {}
+    berhasil = 0
+    for order in orders:
+        username = order[1]
+        engine = SiliwangiEngine(telegram_id=str(ADMIN_ID), username=username)
+        if await engine.login():
+            mesin_siaga[ADMIN_ID][username] = engine
+            berhasil += 1
+        else:
+            await engine.close()
+
+    await callback.message.answer(
+        f"✅ Login selesai: **{berhasil}/{len(orders)}** akun standby.\n"
+        f"🔑 Cookies disimpan ke database — tidak perlu login ulang.",
+        parse_mode="Markdown"
+    )
+
+@router.callback_query(F.data == "reset_session")
+async def cb_reset_session(callback: CallbackQuery):
+    """Hapus cookies session akun aktif saat ini (paksa login ulang)."""
+    current = get_current_user(str(callback.from_user.id))
+    if not current:
+        await callback.answer("Tidak ada akun aktif.", show_alert=True)
+        return
+    clear_session_cookies(str(callback.from_user.id), current)
+    # Hapus dari mesin_siaga jika ada
+    if ADMIN_ID in mesin_siaga and current in mesin_siaga[ADMIN_ID]:
+        engine = mesin_siaga[ADMIN_ID].pop(current)
+        await engine.close()
+    await callback.answer(f"🗑️ Session {current} dihapus. Login ulang saat war.", show_alert=True)
 
 @router.message(AkunState.waiting_for_username)
 async def process_username(message: Message, state: FSMContext):
