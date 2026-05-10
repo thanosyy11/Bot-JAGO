@@ -199,7 +199,8 @@ def get_main_menu_keyboard():
         [InlineKeyboardButton(text="📦 Input Pesanan", callback_data="menu_order")],
         [InlineKeyboardButton(text="👥 Kelola Multi-Akun", callback_data="menu_akun")],
         [InlineKeyboardButton(text="📝 Pesanan & Kelola", callback_data="menu_kelola")],
-        [InlineKeyboardButton(text="📊 Status", callback_data="menu_status")]
+        [InlineKeyboardButton(text="📊 Status", callback_data="menu_status")],
+        [InlineKeyboardButton(text="📖 Tutorial & Panduan", callback_data="tutorial:1")],
     ])
 
 @router.message(CommandStart())
@@ -207,13 +208,169 @@ async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     current_user = get_current_user(str(message.from_user.id))
     status_akun = f"{current_user}" if current_user else "Belum Ada Akun"
-    
+
     teks = (
         f"🤖 **Bot JAGO**\n\n"
         f"🟢 **Akun Aktif:** `{status_akun}`\n\n"
-        f"*(Input pesanan akan otomatis masuk ke Akun Aktif)*"
+        f"💡 Pertama kali pakai? Buka **📖 Tutorial & Panduan**."
     )
     await message.answer(teks, reply_markup=get_main_menu_keyboard(), parse_mode="Markdown")
+
+# ============================================================
+# TUTORIAL MULTI-HALAMAN
+# ============================================================
+
+TUTORIAL_PAGES = [
+    # Halaman 1 — Overview
+    (
+        "📖 **TUTORIAL BOT JAGO** — Hal. 1/7\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "🤖 **Apa itu Bot JAGO?**\n\n"
+        "Bot JAGO adalah bot Telegram untuk otomasi order WooCommerce saat flash sale (War).\n\n"
+        "**Fitur utama:**\n"
+        "• ⚡ Checkout otomatis tepat jam 08:00 WIB\n"
+        "• 👥 Multi-akun (hingga 10 akun sekaligus)\n"
+        "• 🧠 Smart tier: amankan stok parsial & fallback otomatis\n"
+        "• 🔑 Session login tersimpan — tidak perlu login ulang\n"
+        "• 📊 Laporan hasil langsung ke Telegram\n\n"
+        "**Jadwal otomatis:**\n"
+        "• `07:55` → Warm-up (login semua akun)\n"
+        "• `08:00` → War eksekusi order\n"
+        "• `09:00` → Cleanup draft tersisa"
+    ),
+    # Halaman 2 — Setup awal
+    (
+        "📖 **TUTORIAL BOT JAGO** — Hal. 2/7\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "🔧 **Setup Awal (Lakukan Sekali)**\n\n"
+        "**Langkah 1 — Tambah Akun:**\n"
+        "1. Buka 👥 **Kelola Multi-Akun**\n"
+        "2. Klik ➕ **Tambah Akun Baru**\n"
+        "3. Masukkan **username/email** akun WooCommerce\n"
+        "4. Masukkan **password** akun\n"
+        "5. Ulangi untuk setiap akun (maks. 10 akun)\n\n"
+        "**Langkah 2 — Login Awal:**\n"
+        "• Setelah tambah akun, klik 🔑 **Login Semua Sekarang**\n"
+        "• Bot akan login & menyimpan cookies ke database\n"
+        "• Setelah ini, bot tidak perlu login ulang kecuali sesi expired\n\n"
+        "💡 _Password disimpan terenkripsi di database._"
+    ),
+    # Halaman 3 — Input Pesanan
+    (
+        "📖 **TUTORIAL BOT JAGO** — Hal. 3/7\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "📦 **Cara Input Pesanan**\n\n"
+        "**Langkah 1 — Pilih Akun Aktif:**\n"
+        "• Buka 👥 **Kelola Multi-Akun** → klik nama akun\n"
+        "• Akun aktif ditandai `🟢🔑` di menu\n\n"
+        "**Langkah 2 — Input Template:**\n"
+        "• Buka 📦 **Input Pesanan**\n"
+        "• Salin template yang muncul, edit kuantitas, kirim\n"
+        "• Format wajib: `- 50x MAXI Belgian Chocolate`\n\n"
+        "**Langkah 3 — Konfirmasi Preview:**\n"
+        "• Bot tampilkan preview + total MAXI\n"
+        "• Klik ✅ **Simpan** jika sudah benar\n\n"
+        "**Ulangi untuk setiap akun** (ganti akun aktif dulu)\n\n"
+        "⚠️ _Pesanan masuk ke akun yang sedang aktif saat input!_"
+    ),
+    # Halaman 4 — Aturan Produk
+    (
+        "📖 **TUTORIAL BOT JAGO** — Hal. 4/7\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "📋 **Aturan Produk & Kelipatan**\n\n"
+        "**MAXI** (wajib kelipatan **12**):\n"
+        "• Tier 1 (utama): Belgian Choco, Black Forest, Dubai Pistachio, Tiramisu, Brownies\n"
+        "• Tier 2 (cadangan): Susu Lembang, Red Velvet, Pandan Wangi, Talas Bogor, Durian MK\n"
+        "• Tier 3 (terakhir): Keju, Alpukat, Black Pink, Durian Montong, Mangga, Original Lapis\n\n"
+        "**DC / Dessert Cake** (wajib kelipatan **4**):\n"
+        "• DC Belgian Chocolate, DC Black Forest\n"
+        "• DC tidak bisa menggantikan MAXI, begitu pula sebaliknya\n\n"
+        "**Plastik** (tidak ada fallback):\n"
+        "• Jika habis → dilewati otomatis, order tetap lanjut\n\n"
+        "**Minimal order: 50 box** (gabungan MAXI + DC)"
+    ),
+    # Halaman 5 — Smart Tier System
+    (
+        "📖 **TUTORIAL BOT JAGO** — Hal. 5/7\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "🧠 **Smart Tier System (Otomatis)**\n\n"
+        "Bot otomatis menangani stok yang habis/kurang:\n\n"
+        "**Contoh: Kamu order 120 MAXI**\n"
+        "```\n"
+        "Skenario A (normal):\n"
+        "  ✅ 120x dari Tier 1 → selesai\n\n"
+        "Skenario B (stok parsial):\n"
+        "  ⚡ Belgian Choco: hanya 13x tersisa\n"
+        "  → Amankan 13x, sisa 107x ke produk berikutnya\n\n"
+        "Skenario C (Tier 1+2 habis):\n"
+        "  ✂️ Otomatis potong 40%: 120 → 72x\n"
+        "  → Order 72x dari Tier 3 (tetap kelipatan 12)\n"
+        "```\n"
+        "💡 _Kamu tidak perlu melakukan apa-apa. Semua otomatis._"
+    ),
+    # Halaman 6 — Manajemen Draf
+    (
+        "📖 **TUTORIAL BOT JAGO** — Hal. 6/7\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "📝 **Manajemen Draf Pesanan**\n\n"
+        "Buka 📝 **Pesanan & Kelola** untuk:\n\n"
+        "• **Lihat status semua akun** — siap/belum ada draf\n"
+        "• **Detail & Edit Draf** — lihat/edit isi pesanan akun aktif\n"
+        "• **Riwayat** — rekap order sukses semua akun\n\n"
+        "**Aturan penting:**\n"
+        "• 1 akun = 1 draf aktif (input baru otomatis gantikan lama)\n"
+        "• Edit aman: draf lama tidak dihapus sampai input baru dikonfirmasi\n"
+        "• Cleanup `09:00` hanya hapus draf war pagi itu — draf baru aman\n\n"
+        "**Cek kesiapan sebelum war:**\n"
+        "Buka Pesanan & Kelola → semua akun harus tampil ✅"
+    ),
+    # Halaman 7 — Alur War & Tips
+    (
+        "📖 **TUTORIAL BOT JAGO** — Hal. 7/7\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "⚔️ **Alur War & Tips Sukses**\n\n"
+        "**H-1 malam (misal 21:00):**\n"
+        "1. Input pesanan untuk semua akun\n"
+        "2. Login Semua Sekarang → pastikan semua 🟢🔑\n"
+        "3. Cek Pesanan & Kelola → semua akun ✅\n\n"
+        "**Pagi hari (07:55-08:00):**\n"
+        "• Bot otomatis warm-up & eksekusi — tidak perlu buka Telegram\n"
+        "• Laporan hasil dikirim ke kamu setelah selesai\n\n"
+        "**Tips sukses:**\n"
+        "• ✅ Pastikan semua akun punya 🔑 session\n"
+        "• ✅ Nama produk harus persis sama dengan template\n"
+        "• ✅ Total MAXI kelipatan 12, DC kelipatan 4\n"
+        "• ✅ Server LXC menyala 24/7\n\n"
+        "🎯 _Selamat War! Gibran & Jokowi for 2029_ 🇮🇩"
+    ),
+]
+
+def _tutorial_keyboard(page: int) -> InlineKeyboardMarkup:
+    """Buat keyboard navigasi halaman tutorial."""
+    total = len(TUTORIAL_PAGES)
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton(text="⬅️ Sebelumnya", callback_data=f"tutorial:{page-1}"))
+    if page < total:
+        nav.append(InlineKeyboardButton(text="Berikutnya ➡️", callback_data=f"tutorial:{page+1}"))
+    rows = []
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton(text="🏠 Menu Utama", callback_data="kembali_ke_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+@router.callback_query(F.data.startswith("tutorial:"))
+async def cb_tutorial(callback: CallbackQuery):
+    page = int(callback.data.split(":")[1])
+    total = len(TUTORIAL_PAGES)
+    page = max(1, min(page, total))  # clamp
+    teks = TUTORIAL_PAGES[page - 1]
+    await callback.message.edit_text(
+        teks,
+        reply_markup=_tutorial_keyboard(page),
+        parse_mode="Markdown"
+    )
+
 
 @router.callback_query(F.data == "menu_akun")
 async def cb_menu_akun(callback: CallbackQuery):
