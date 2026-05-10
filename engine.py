@@ -206,34 +206,69 @@ class SiliwangiEngine:
     # ------------------------------------------------------------------
     # ADD TO CART
     # ✅ Menggunakan ?wc-ajax=add_to_cart (standard WooCommerce AJAX)
-    #    sesuai dengan mekanisme Flatsome quickview + WooCommerce handler
     # ------------------------------------------------------------------
 
-    async def _add_to_cart(self, prod_id, qty):
+    def _parse_available_stock(self, error_msg: str) -> int:
         """
-        Menambahkan produk ke keranjang via WooCommerce AJAX endpoint.
-        Sesuai dengan record: tombol single_add_to_cart_button di quickview
-        memanggil ?wc-ajax=add_to_cart dengan product_id dan quantity.
+        Parse pesan error WooCommerce untuk mengetahui stok yang tersedia.
+        Return 0 jika tidak bisa diparsing.
+        Contoh error: '...hanya tersedia 13...' atau '...13 available...'
+        """
+        patterns = [
+            r'(\d+)\s+(?:tersedia|available)',
+            r'(?:tersedia|available)\s*[:\-]?\s*(\d+)',
+            r'(?:stok|stock)\s*(?:tersisa|tersedia)?\s*[:\-]?\s*(\d+)',
+            r'maximum\s+(?:is\s+)?(\d+)',
+        ]
+        for p in patterns:
+            m = re.search(p, str(error_msg), re.IGNORECASE)
+            if m:
+                return int(m.group(1))
+        return 0
+
+    async def _add_to_cart(self, prod_id, qty) -> tuple:
+        """
+        Menambahkan produk ke keranjang via WooCommerce AJAX.
+        Return: (success: bool, qty_added: int)
+
+        Jika server menolak qty penuh tapi masih ada stok parsial,
+        bot akan mengamankan stok yang tersedia.
         """
         url = "https://siliwangibolukukus.com/?wc-ajax=add_to_cart"
-        payload = {
-            "product_id": str(prod_id),
-            "quantity":   str(qty)
-        }
 
         try:
-            res = await self._safe_request('POST', url, data=payload)
+            res = await self._safe_request('POST', url, data={
+                "product_id": str(prod_id),
+                "quantity":   str(qty)
+            })
             if not res:
-                return False
+                return False, 0
 
-            # Coba parse JSON response WooCommerce
             try:
                 data = res.json()
-                if data.get('error'):
-                    logger.warning(f"🕵️ [STOK] Server menolak ID {prod_id}: {data.get('error')}")
-                    return False
+                # Sukses penuh
                 if 'fragments' in data or 'cart_hash' in data:
-                    return True
+                    return True, qty
+
+                # Server menolak — cek apakah ada stok parsial
+                if data.get('error'):
+                    err_txt = str(data.get('error', ''))
+                    logger.warning(f"🕵️ [STOK] ID {prod_id} ditolak: {err_txt[:120]}")
+                    available = self._parse_available_stock(err_txt)
+                    if available and 0 < available < qty:
+                        logger.info(f"📦 Stok parsial terdeteksi: {available}x tersedia untuk ID {prod_id}")
+                        res2 = await self._safe_request('POST', url, data={
+                            "product_id": str(prod_id),
+                            "quantity":   str(available)
+                        })
+                        if res2:
+                            try:
+                                d2 = res2.json()
+                                if 'fragments' in d2 or 'cart_hash' in d2:
+                                    return True, available  # Sukses parsial
+                            except Exception:
+                                pass
+                    return False, 0
             except Exception:
                 pass
 
@@ -241,28 +276,28 @@ class SiliwangiEngine:
             url_get = f"https://siliwangibolukukus.com/?add-to-cart={prod_id}&quantity={qty}"
             res_get = await self._safe_request('GET', url_get)
             if not res_get:
-                return False
+                return False, 0
 
-            res_text_lower = res_get.text.lower()
-            if any(kw in res_text_lower for kw in ["tidak dapat menambahkan", "out of stock", "habis"]):
-                logger.warning(f"🕵️ [STOK] Gagal via GET. ID: {prod_id}")
-                return False
+            if any(kw in res_get.text.lower() for kw in ["tidak dapat menambahkan", "out of stock", "habis"]):
+                return False, 0
 
-            return True
+            return True, qty
 
         except Exception as e:
             logger.error(f"Error _add_to_cart [{self.username}]: {e}")
-            return False
+            return False, 0
 
     async def add_to_cart_with_fallback(self, item):
-        target_id  = item['id']
-        qty        = item['qty']
-        nama       = item['nama']
+        """Digunakan untuk DC dan PLASTIK. MAXI menggunakan _smart_maxi_fill."""
+        target_id   = item['id']
+        qty         = item['qty']
+        nama        = item['nama']
         target_tier = item.get('tier', 0)
-        kategori   = item.get('kategori', '')
+        kategori    = item.get('kategori', '')
 
-        if await self._add_to_cart(target_id, qty):
-            logger.info(f"✅ [{self.username}] Masuk: {qty}x {nama}")
+        success, added = await self._add_to_cart(target_id, qty)
+        if success:
+            logger.info(f"✅ [{self.username}] Masuk: {added}x {nama}")
             return True
 
         if target_tier == 0:
@@ -273,8 +308,7 @@ class SiliwangiEngine:
         conn = sqlite3.connect(DB_NAME, timeout=10)
         cursor = conn.cursor()
         cursor.execute('''
-            SELECT id, nama, tier
-            FROM products
+            SELECT id, nama, tier FROM products
             WHERE kategori=? AND tier>0 AND id!=?
             ORDER BY ABS(tier - ?) ASC
         ''', (kategori, target_id, target_tier))
@@ -283,12 +317,101 @@ class SiliwangiEngine:
 
         for alt_id, alt_nama, alt_tier in alternatives:
             logger.info(f"   🔄 [{self.username}] Mencoba: {alt_nama} (Tier {alt_tier})...")
-            if await self._add_to_cart(alt_id, qty):
+            ok, added = await self._add_to_cart(alt_id, qty)
+            if ok:
                 logger.info(f"   🎯 [{self.username}] Disubstitusi dengan: {alt_nama}!")
                 return True
 
         logger.error(f"💀 [{self.username}] GAGAL TOTAL! Semua varian {kategori} habis.")
         return False
+
+    # ------------------------------------------------------------------
+    # SMART MAXI FILL (v2.0)
+    # Partial fill + tier chain + Tier 3 cut 40%
+    # ------------------------------------------------------------------
+
+    async def _smart_maxi_fill(self, maxi_items: list) -> int:
+        """
+        Mengisi keranjang MAXI dengan cerdas:
+        - Partial fill: amankan stok sisa, lanjut ke produk berikutnya
+        - Tier chain: Tier 1 → Tier 2 → Tier 3
+        - Tier 3 only cut: jika hanya Tier 3 tersedia, potong 40%
+
+        Return: total qty MAXI yang berhasil masuk keranjang
+        """
+        total_needed = sum(item['qty'] for item in maxi_items)
+        remaining    = total_needed
+        total_added  = 0
+        tiers_contributed = set()   # Tier mana saja yang berhasil masuk
+        tier3_cut_applied = False
+
+        # ── Bangun priority queue ────────────────────────────────────────
+        # 1. Item yang diminta user (urutan asli input)
+        # 2. Produk MAXI lain dari DB (belum di-request, sebagai fallback)
+        user_ids = {item['id'] for item in maxi_items}
+
+        conn = sqlite3.connect(DB_NAME, timeout=10)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT id, nama, tier FROM products
+            WHERE kategori='MAXI' AND tier > 0
+            ORDER BY tier ASC, id ASC
+        ''')
+        all_maxi_db = {row[0]: row for row in cursor.fetchall()}
+        conn.close()
+
+        # Priority queue: user's items first, then DB fallbacks
+        priority_queue = list(maxi_items)  # dicts dengan 'id','nama','qty','tier'
+        for prod_id, (pid, pnama, ptier) in all_maxi_db.items():
+            if prod_id not in user_ids:
+                priority_queue.append({'id': pid, 'nama': pnama,
+                                       'qty': 0, 'tier': ptier,
+                                       'kategori': 'MAXI', '_fallback': True})
+
+        # ── Proses setiap produk dalam antrian ───────────────────────────
+        for product in priority_queue:
+            if remaining <= 0:
+                break
+
+            tier = product.get('tier', 1)
+
+            # Tier 3 cut — hanya 1x, hanya jika Tier 1 & 2 tidak berkontribusi
+            if (tier == 3
+                    and not tier3_cut_applied
+                    and tiers_contributed.isdisjoint({1, 2})):
+                cut = max(12, (int(remaining * 0.60) // 12) * 12)
+                logger.info(f"✂️ [{self.username}] Tier 3 only — potong 40%: {remaining}x → {cut}x")
+                self._step("✂️", "Tier 3 Only",
+                           f"Semua T1+T2 habis. Target dipotong 40%: {remaining}→{cut}x")
+                remaining = cut
+                tier3_cut_applied = True
+
+            # Tentukan qty yang akan dicoba
+            is_fallback = product.get('_fallback', False)
+            qty_to_try  = remaining if is_fallback else min(product['qty'], remaining)
+            if qty_to_try <= 0:
+                continue
+
+            ok, added = await self._add_to_cart(product['id'], qty_to_try)
+
+            if added > 0:
+                tiers_contributed.add(tier)
+                total_added += added
+                remaining   -= added
+                if added < qty_to_try:
+                    self._step("⚡", f"{product['nama']}",
+                               f"Parsial {added}/{qty_to_try}x (sisa {remaining}x)")
+                else:
+                    self._step("🛒", f"{added}x {product['nama']}", "Masuk")
+            else:
+                self._step("⚠️", f"{product['nama']}", "Habis / Gagal")
+
+        if remaining > 0:
+            logger.warning(f"⚠️ [{self.username}] MAXI kurang {remaining}x dari target {total_needed}x")
+            self._step("⚠️", "MAXI", f"Kurang {remaining}x dari {total_needed}x")
+
+        logger.info(f"✅ [{self.username}] Total MAXI masuk keranjang: {total_added}x")
+        return total_added
 
     # ------------------------------------------------------------------
     # AMBIL NONCE CHECKOUT & SECURITY
@@ -478,15 +601,30 @@ class SiliwangiEngine:
         await self.clear_cart()
         self._step("🧹", "Clear Cart", "Selesai")
 
+        # ── Pisahkan item berdasarkan kategori ───────────────────────────
+        maxi_items    = [i for i in keranjang if i['kategori'] == 'MAXI']
+        dc_items      = [i for i in keranjang if i['kategori'] == 'DC']
+        plastik_items = [i for i in keranjang if i['kategori'] == 'PLASTIK']
 
-        for item in keranjang:
-            ok = await self.add_to_cart_with_fallback(item)
-            nama_item = item['nama']
-            qty_item  = item['qty']
+        # MAXI: smart tier fill (v2.0)
+        if maxi_items:
+            await self._smart_maxi_fill(maxi_items)
+
+        # DC: independen, tidak boleh tukar dengan MAXI
+        for item in dc_items:
+            ok, added = await self._add_to_cart(item['id'], item['qty'])
             if ok:
-                self._step("🛒", f"{qty_item}x {nama_item}", "Masuk")
+                self._step("🛒", f"{added}x {item['nama']}", "Masuk")
             else:
-                self._step("⚠️", f"{qty_item}x {nama_item}", "HABIS/GAGAL")
+                self._step("⚠️", f"{item['qty']}x {item['nama']}", "DC HABIS (no fallback)")
+
+        # PLASTIK: Tier 0, skip jika habis (tidak ada fallback)
+        for item in plastik_items:
+            ok, added = await self._add_to_cart(item['id'], item['qty'])
+            if ok:
+                self._step("🛒", f"{added}x {item['nama']}", "Masuk")
+            else:
+                self._step("⚠️", f"{item['nama']}", "Plastik SKIP (Tier 0, tidak ada pengganti)")
 
         if not await self.get_checkout_nonce():
             self._step("❌", "Checkout Nonce", "Tidak ditemukan")
