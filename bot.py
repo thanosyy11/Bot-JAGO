@@ -62,16 +62,29 @@ async def eksekusi_dengan_jeda(engine, delay, username, dry_run=False):
 async def job_pemanasan():
     logger.info("Warm Up (07:55)...")
     orders = get_all_pending_orders_multi(str(ADMIN_ID))
-    
+
     if not orders:
+        await bot.send_message(
+            ADMIN_ID,
+            "🏖️ **[07:55]** Tidak ada draf pesanan hari ini. Bot tidak aktif."
+        )
         logger.info("[Libur] Tidak ada draf pesanan.")
         return
 
-    await bot.send_message(ADMIN_ID, f"⚙️ Terdeteksi {len(orders)} draf pesanan! Memulai pemanasan massal...")
-    
+    # Notifikasi warm-up dimulai — lengkap
+    draf_info = "\n".join([f"  · `{o[1]}`" for o in orders])
+    await bot.send_message(
+        ADMIN_ID,
+        f"⚙️ **[07:55] WARM-UP DIMULAI**\n\n"
+        f"Ditemukan **{len(orders)} draf** pesanan:\n{draf_info}\n\n"
+        f"_Memulai login semua akun..._",
+        parse_mode="Markdown"
+    )
+
     mesin_siaga[ADMIN_ID] = {}
     berhasil_login = 0
-    
+    gagal_login = []
+
     for order in orders:
         username = order[1]
         engine = SiliwangiEngine(telegram_id=str(ADMIN_ID), username=username)
@@ -79,12 +92,22 @@ async def job_pemanasan():
             mesin_siaga[ADMIN_ID][username] = engine
             berhasil_login += 1
         else:
+            gagal_login.append(username)
             await engine.close()
 
     if berhasil_login > 0:
-        await bot.send_message(ADMIN_ID, f"✅ *{berhasil_login} Akun Standby!*")
+        status_txt = f"✅ Login berhasil: **{berhasil_login}/{len(orders)} akun**"
+        if gagal_login:
+            status_txt += f"\n❌ Gagal login: " + ", ".join([f"`{u}`" for u in gagal_login])
+        status_txt += "\n\n⏳ _Siap eksekusi jam 08:00 WIB._"
+        await bot.send_message(ADMIN_ID, status_txt, parse_mode="Markdown")
     else:
-        await bot.send_message(ADMIN_ID, "❌ **[GAGAL]** Tidak ada akun yang berhasil login.")
+        await bot.send_message(
+            ADMIN_ID,
+            "🚨 **[GAGAL WARM-UP]**\nTidak ada akun yang berhasil login!\n"
+            "Periksa koneksi server dan kredensial akun."
+        )
+
 
 async def job_eksekusi():
     logger.info("Mengecek jadwal (08:00)...")
@@ -188,8 +211,63 @@ async def job_bersihkan_draft():
         pass
 
 # ============================================================
+# HEALTH CHECK — Cek website & session setiap hari jam 07:00
+# ============================================================
+async def job_health_check():
+    """
+    Cek harian jam 07:00 WIB:
+    - Apakah website target bisa dijangkau
+    - Apakah session setiap akun masih valid
+    Laporkan hasilnya ke admin.
+    """
+    import httpx as _httpx
+    logger.info("[07:00] Health check dimulai...")
+
+    # 1. Cek website
+    website_ok = False
+    try:
+        async with _httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            resp = await client.get("https://siliwangibolukukus.com/")
+            website_ok = resp.status_code < 500
+    except Exception as e:
+        logger.warning(f"Health check website gagal: {e}")
+
+    # 2. Cek session setiap akun yang punya draf
+    orders = get_all_pending_orders_multi(str(ADMIN_ID))
+    session_lines = []
+    for order in orders:
+        username = order[1]
+        engine = SiliwangiEngine(telegram_id=str(ADMIN_ID), username=username)
+        try:
+            import httpx as _h
+            resp2 = await engine.client.get("https://siliwangibolukukus.com/my-account/")
+            if "Keluar" in resp2.text or "Logout" in resp2.text:
+                session_lines.append(f"  ✅ `{username}` — session aktif")
+            else:
+                session_lines.append(f"  ⚠️ `{username}` — session EXPIRED")
+        except Exception:
+            session_lines.append(f"  ❌ `{username}` — tidak bisa dicek")
+        finally:
+            await engine.close()
+
+    web_status = "✅ Website OK" if website_ok else "❌ Website TIDAK DAPAT DIJANGKAU!"
+    sesi_status = "\n".join(session_lines) if session_lines else "  _(tidak ada draf aktif)_"
+
+    pesan = (
+        f"🟡 **[07:00] HEALTH CHECK**\n\n"
+        f"**Website:** {web_status}\n\n"
+        f"**Session Akun:**\n{sesi_status}\n\n"
+        f"_War dimulai jam 08:00 WIB._"
+    )
+    try:
+        await bot.send_message(ADMIN_ID, pesan, parse_mode="Markdown")
+    except Exception:
+        pass
+
+# ============================================================
 # JADWAL UTAMA
 # ============================================================
+scheduler.add_job(job_health_check,    'cron', hour=7,  minute=0,  second=0)
 scheduler.add_job(job_pemanasan,       'cron', hour=7,  minute=55, second=0)
 scheduler.add_job(job_eksekusi,        'cron', hour=8,  minute=0,  second=0)
 scheduler.add_job(job_bersihkan_draft, 'cron', hour=9,  minute=0,  second=0)
@@ -202,6 +280,27 @@ def get_main_menu_keyboard():
         [InlineKeyboardButton(text="📊 Status", callback_data="menu_status")],
         [InlineKeyboardButton(text="📖 Tutorial & Panduan", callback_data="tutorial:1")],
     ])
+
+@router.message(Command("help"))
+async def cmd_help(message: Message):
+    teks = (
+        "🤖 **Bot JAGO — Perintah Tersedia**\n\n"
+        "/start — Buka menu utama\n"
+        "/help — Tampilkan pesan ini\n\n"
+        "**Navigasi via tombol:**\n"
+        "• 📦 Input Pesanan — input order template\n"
+        "• 👥 Kelola Multi-Akun — tambah/login/reset akun\n"
+        "• 📝 Pesanan & Kelola — lihat semua draf + riwayat\n"
+        "• 📊 Status — ringkasan draf saat ini\n"
+        "• 📖 Tutorial — panduan lengkap 7 halaman\n\n"
+        "**Jadwal otomatis (tidak perlu manual):**\n"
+        "• `07:00` → Health check website + session\n"
+        "• `07:55` → Warm-up login semua akun\n"
+        "• `08:00` → Eksekusi order (War)\n"
+        "• `09:00` → Cleanup draft\n\n"
+        "💡 _Buka 📖 Tutorial untuk panduan lengkap._"
+    )
+    await message.answer(teks, reply_markup=get_main_menu_keyboard(), parse_mode="Markdown")
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
@@ -226,10 +325,10 @@ TUTORIAL_PAGES = [
         "📖 **TUTORIAL BOT JAGO** — Hal. 1/7\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "🤖 **Apa itu Bot JAGO?**\n\n"
-        "Bot JAGO adalah bot Telegram untuk otomasi order WooCommerce saat flash sale (War).\n\n"
+        "Bot JAGO adalah bot Telegram untuk otomasi order WooCommerce.\n\n"
         "**Fitur utama:**\n"
         "• ⚡ Checkout otomatis tepat jam 08:00 WIB\n"
-        "• 👥 Multi-akun (hingga 10 akun sekaligus)\n"
+        "• 👥 Multi-akun (hingga 2 akun sekaligus)\n"
         "• 🧠 Smart tier: amankan stok parsial & fallback otomatis\n"
         "• 🔑 Session login tersimpan — tidak perlu login ulang\n"
         "• 📊 Laporan hasil langsung ke Telegram\n\n"
@@ -248,7 +347,7 @@ TUTORIAL_PAGES = [
         "2. Klik ➕ **Tambah Akun Baru**\n"
         "3. Masukkan **username/email** akun WooCommerce\n"
         "4. Masukkan **password** akun\n"
-        "5. Ulangi untuk setiap akun (maks. 10 akun)\n\n"
+        "5. Ulangi untuk akun ke-2 (maks. 2 akun)\n\n"
         "**Langkah 2 — Login Awal:**\n"
         "• Setelah tambah akun, klik 🔑 **Login Semua Sekarang**\n"
         "• Bot akan login & menyimpan cookies ke database\n"
@@ -398,7 +497,7 @@ async def cb_menu_akun(callback: CallbackQuery):
 
     total = len(accounts)
     teks = (
-        f"👥 **Manajemen Akun** ({total}/10)\n\n"
+        f"👥 **Manajemen Akun** ({total}/2)\n\n"
         f"🟢🔑 = Aktif + Session\n"
         f"🔑 = Session tersimpan\n"
         f"⚪ = Belum login\n\n"
@@ -422,14 +521,14 @@ async def cb_setacc(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "add_new_acc")
 async def cb_add_new_acc(callback: CallbackQuery, state: FSMContext):
     total = count_accounts(str(callback.from_user.id))
-    if total >= 10:
+    if total >= 2:
         await callback.answer(
-            "⛔ Maksimal 10 akun. Hapus salah satu sebelum menambah.",
+            "⛔ Maksimal 2 akun. Reset session atau hubungi admin.",
             show_alert=True
         )
         return
     await callback.message.edit_text(
-        f"➕ **Tambah Akun** ({total}/10)\nMasukan **Username/Email**:",
+        f"➕ **Tambah Akun** ({total}/2)\nMasukan **Username/Email**:",
         parse_mode="Markdown"
     )
     await state.set_state(AkunState.waiting_for_username)
