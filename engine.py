@@ -575,7 +575,7 @@ class SiliwangiEngine:
             base_payload['orddd_lite_lockout_days']            = ' '
             base_payload['orddd_admin_url']                    = 'https://siliwangibolukukus.com/wp-admin/'
             base_payload['orddd_lite_disable_for_holidays']    = 'no'
-            base_payload['_wp_http_referer']                   = '/checkout/'
+            base_payload['_wp_http_referer']                   = '/?wc-ajax=update_order_review'
 
             # 4) ✅ Panggil update_order_review sebelum checkout final (sesuai record)
             await self._call_update_order_review(base_payload)
