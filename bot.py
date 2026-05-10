@@ -18,7 +18,8 @@ from database import (
     get_current_user, get_pending_order, delete_pending_order,
     get_all_accounts, set_active_account, get_all_pending_orders_multi,
     get_order_history, cleanup_all_pending_orders, init_db,
-    get_all_accounts_with_status, count_accounts, clear_session_cookies
+    get_all_accounts_with_status, count_accounts, clear_session_cookies,
+    get_all_drafts_overview
 )
 from engine import SiliwangiEngine
 
@@ -45,6 +46,8 @@ class AkunState(StatesGroup):
 
 class OrderState(StatesGroup):
     waiting_for_template = State()
+    editing_existing     = State()  # Edit draf yg ada — draf asli BELUM dihapus
+    confirming_order     = State()  # Preview sebelum simpan
 
 mesin_siaga = {} 
 
@@ -189,7 +192,7 @@ async def job_bersihkan_draft():
 # ============================================================
 scheduler.add_job(job_pemanasan,       'cron', hour=7,  minute=55, second=0)
 scheduler.add_job(job_eksekusi,        'cron', hour=8,  minute=0,  second=0)
-scheduler.add_job(job_bersihkan_draft, 'cron', hour=9,  minute=0,  second=0)  # ✅ Cleanup otomatis
+scheduler.add_job(job_bersihkan_draft, 'cron', hour=9,  minute=0,  second=0)
 
 def get_main_menu_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -351,43 +354,91 @@ async def cb_menu_status(callback: CallbackQuery):
 
 @router.callback_query(F.data == "menu_kelola")
 async def cb_menu_kelola(callback: CallbackQuery):
-    current_user = get_current_user(str(callback.from_user.id))
-    pending = get_pending_order(str(callback.from_user.id))
-    
+    tid = str(callback.from_user.id)
+    overview = get_all_drafts_overview(tid)
+    current_user = get_current_user(tid)
+
+    teks = "📝 **SEMUA DRAF PESANAN**\n\n"
+    siap = 0
+    for username, is_active, has_draft, total_maxi, tgl_buat in overview:
+        aktif_mark = " ← aktif" if username == current_user else ""
+        if has_draft:
+            siap += 1
+            # Cek apakah draf ini lama (lebih dari 18 jam)
+            tgl_str = tgl_buat[:16] if tgl_buat else "?"
+            teks += f"✅ `{username[:28]}`{aktif_mark}\n"
+            teks += f"   📦 {total_maxi} MAXI · 🕒 {tgl_str}\n\n"
+        else:
+            teks += f"❌ `{username[:28]}`{aktif_mark}\n"
+            teks += f"   _(belum ada draf)_\n\n"
+
+    teks += f"**Siap perang: {siap}/{len(overview)} akun**"
+
+    keyboard = [
+        [InlineKeyboardButton(text="👁 Detail & Edit Draf Akun Aktif", callback_data="detail_draf_aktif")],
+        [InlineKeyboardButton(text="📜 Riwayat Semua Akun", callback_data="lihat_riwayat")],
+        [InlineKeyboardButton(text="🔙 Kembali", callback_data="kembali_ke_menu")],
+    ]
+    await callback.message.edit_text(
+        teks, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard), parse_mode="Markdown"
+    )
+
+@router.callback_query(F.data == "detail_draf_aktif")
+async def cb_detail_draf_aktif(callback: CallbackQuery):
+    tid = str(callback.from_user.id)
+    current_user = get_current_user(tid)
+    pending = get_pending_order(tid)
+
     keyboard = []
     if pending:
-        order_id, total_maxi, payload_json = pending
+        order_id, total_maxi, payload_json, tgl_buat = pending
         keranjang = json.loads(payload_json)
-        teks_keranjang = "\n".join([f"- {item['qty']}x {item['nama']}" for item in keranjang])
-        
-        teks = f"📝 **DRAF AKUN: {current_user}**\n\n{teks_keranjang}\n\n📦 **Total MAXI:** {total_maxi} pcs"
-        keyboard.append([InlineKeyboardButton(text="✏️ Edit Order", callback_data="edit_order")])
-        keyboard.append([InlineKeyboardButton(text="🗑️ Hapus Order", callback_data="hapus_order")])
+        teks_items = "\n".join([f"  · {i['qty']}x {i['nama']}" for i in keranjang])
+        tgl_str = tgl_buat[:16] if tgl_buat else "?"
+        teks = (
+            f"📦 **DRAF: {current_user}**\n"
+            f"🕒 Dibuat: {tgl_str}\n\n"
+            f"{teks_items}\n\n"
+            f"📊 Total MAXI: **{total_maxi} pcs**"
+        )
+        keyboard.append([InlineKeyboardButton(text="✏️ Edit Draf", callback_data="edit_order")])
+        keyboard.append([InlineKeyboardButton(text="🗑️ Hapus Draf", callback_data="hapus_order")])
     else:
-        teks = f"⭕ Tidak ada draf PENDING untuk akun **{current_user}**.\n\n*(Jika ingin melihat draf akun lain, ganti Akun Aktif di menu Kelola Multi-Akun)*"
+        teks = f"⭕ Tidak ada draf untuk akun **{current_user}**."
 
-    keyboard.append([InlineKeyboardButton(text="📜 Lihat Riwayat Order", callback_data="lihat_riwayat")])
-    keyboard.append([InlineKeyboardButton(text="🔙 Kembali", callback_data="kembali_ke_menu")])
-    
-    await callback.message.edit_text(teks, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard), parse_mode="Markdown")
+    keyboard.append([InlineKeyboardButton(text="🔙 Kembali", callback_data="menu_kelola")])
+    await callback.message.edit_text(
+        teks, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard), parse_mode="Markdown"
+    )
 
 @router.callback_query(F.data == "lihat_riwayat")
 async def cb_lihat_riwayat(callback: CallbackQuery):
-    current_user = get_current_user(str(callback.from_user.id))
-    rows = get_order_history(str(callback.from_user.id), current_user)
-    
-    if not rows:
-        await callback.answer("Belum ada riwayat sukses untuk akun ini.", show_alert=True)
+    """Riwayat semua akun, bukan hanya akun aktif."""
+    tid = str(callback.from_user.id)
+    accounts = get_all_accounts(tid)
+    if not accounts:
+        await callback.answer("Belum ada akun.", show_alert=True)
         return
-        
-    teks = f"📜 **RIWAYAT ORDER: {current_user}** (3 Terakhir)\n\n"
-    for tgl, total, payload in rows:
-        keranjang = json.loads(payload)
-        preview = ", ".join([f"{i['qty']}x {i['nama']}" for i in keranjang[:3]])
-        if len(keranjang) > 3:
-            preview += "..."
-        teks += f"🗓️ **{tgl}**\n📦 Total: {total} pcs\n🛒 Isi: {preview}\n\n"
-        
+
+    teks = "📜 **RIWAYAT ORDER (Semua Akun)**\n\n"
+    ada_riwayat = False
+    for acc, _ in accounts:
+        rows = get_order_history(tid, acc)
+        if not rows:
+            continue
+        ada_riwayat = True
+        teks += f"👤 `{acc[:30]}`\n"
+        for tgl, total, payload in rows:
+            keranjang = json.loads(payload)
+            preview = ", ".join([f"{i['qty']}x {i['nama']}" for i in keranjang[:2]])
+            if len(keranjang) > 2:
+                preview += "..."
+            teks += f"  🗓 {tgl[:16]} · {total} pcs\n  {preview}\n"
+        teks += "\n"
+
+    if not ada_riwayat:
+        teks += "_(Belum ada riwayat order yang sukses)_"
+
     btn = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Kembali", callback_data="menu_kelola")]])
     await callback.message.edit_text(teks, reply_markup=btn, parse_mode="Markdown")
 
@@ -406,18 +457,21 @@ async def cb_confirm_hapus(callback: CallbackQuery):
 
 @router.callback_query(F.data == "edit_order")
 async def cb_edit_order(callback: CallbackQuery, state: FSMContext):
+    """Edit draf — draf ASLI tidak dihapus sampai user submit input baru."""
     pending = get_pending_order(str(callback.from_user.id))
-    if not pending: return
-    _, _, payload_json = pending
+    if not pending:
+        await callback.answer("Draf tidak ditemukan.", show_alert=True)
+        return
+    _, _, payload_json, _ = pending
     keranjang = json.loads(payload_json)
-    delete_pending_order(str(callback.from_user.id))
-    
-    teks_template = "Salin dan edit:\n\n"
+
+    teks_template = "✏️ **Edit Pesanan** — salin & ubah lalu kirim:\n\n"
     for item in keranjang:
         teks_template += f"- {item['qty']}x {item['nama']}\n"
-    
+
     await callback.message.edit_text(teks_template, parse_mode="Markdown")
-    await state.set_state(OrderState.waiting_for_template)
+    # Pakai state khusus editing — draf lama BELUM dihapus
+    await state.set_state(OrderState.editing_existing)
 
 @router.callback_query(F.data == "menu_order")
 async def cb_menu_order(callback: CallbackQuery, state: FSMContext):
@@ -453,74 +507,147 @@ async def cb_menu_order(callback: CallbackQuery, state: FSMContext):
     await state.set_state(OrderState.waiting_for_template)
     await callback.answer()
 
+@router.message(OrderState.editing_existing)
+async def process_edit_existing(message: Message, state: FSMContext):
+    """Proses input edit — validasi dulu, baru hapus draf lama dan simpan baru."""
+    # Gunakan logika yang sama dengan process_template
+    await _proses_input_order(message, state, is_edit=True)
+
 @router.message(OrderState.waiting_for_template)
 async def process_template(message: Message, state: FSMContext):
+    await _proses_input_order(message, state, is_edit=False)
+
+async def _proses_input_order(message: Message, state: FSMContext, is_edit: bool = False):
+    """Core logic parse + validasi + preview konfirmasi input pesanan."""
     products_db = get_all_products_dict()
     lines = message.text.strip().split('\n')
     keranjang = []
     total_maxi = 0
+    baris_tidak_dikenal = []
 
     for line in lines:
         line = line.strip()
-        if not line or not line.startswith('-'): continue
+        if not line or not line.startswith('-'):
+            continue
         try:
             parts = line.split('x ', 1)
             qty = int(parts[0].replace('-', '').strip())
             nama_produk = parts[1].strip()
-
-            if qty <= 0: continue
+            if qty <= 0:
+                continue
             if nama_produk in products_db:
                 prod_info = products_db[nama_produk]
                 keranjang.append({
-                    "id": prod_info["id"], "nama": nama_produk, 
+                    "id": prod_info["id"], "nama": nama_produk,
                     "qty": qty, "kategori": prod_info["kategori"], "tier": prod_info["tier"]
                 })
-                if prod_info["kategori"] == "MAXI": total_maxi += qty
+                if prod_info["kategori"] == "MAXI":
+                    total_maxi += qty
+            else:
+                baris_tidak_dikenal.append(f"`{nama_produk}`")
         except Exception:
             pass
 
+    # Tampilkan peringatan baris tidak dikenal
+    if baris_tidak_dikenal:
+        await message.answer(
+            f"⚠️ **Produk tidak dikenal (dilewati):**\n" +
+            "\n".join(baris_tidak_dikenal) +
+            "\n\n_Pastikan nama persis sama dengan template._",
+            parse_mode="Markdown"
+        )
+
     if not keranjang:
-        await message.answer("⚠️ Keranjang kosong. Pastikan format teks sudah benar.")
+        await message.answer(
+            "❌ **Tidak ada produk yang dikenali.**\n"
+            "Pastikan format: `- 50x MAXI Belgian Chocolate`\n"
+            "_(Nama harus sama persis dengan template)_",
+            parse_mode="Markdown"
+        )
         return
 
-    # === VALIDASI MINIMAL ORDER (GABUNGAN) ===
-    total_kue = sum(item['qty'] for item in keranjang if item['kategori'] in ['MAXI', 'DC'])
+    # Validasi minimal 50 box kue
+    total_kue = sum(i['qty'] for i in keranjang if i['kategori'] in ['MAXI', 'DC'])
     if total_kue < 50:
         await message.answer(
-            f"⚠️ **PERINGATAN MINIMAL ORDER**\nTotal kue (MAXI + DC): **{total_kue} box**.\nWeb Siliwangi mewajibkan minimal **50 box**.",
+            f"⚠️ **Minimal Order Belum Terpenuhi**\n"
+            f"Total kue (MAXI+DC): **{total_kue} box** — wajib min. **50 box**.",
             parse_mode="Markdown"
         )
         return
 
-    # === VALIDASI KELIPATAN MAXI (12) ===
-    total_maxi_cek = sum(item['qty'] for item in keranjang if item['kategori'] == 'MAXI')
-    if total_maxi_cek > 0 and total_maxi_cek % 12 != 0:
-        sisa = total_maxi_cek % 12
-        kurang, tambah = sisa, 12 - sisa
+    # Validasi kelipatan MAXI
+    if total_maxi > 0 and total_maxi % 12 != 0:
+        sisa = total_maxi % 12
         await message.answer(
-            f"⚠️ **PERINGATAN KELIPATAN MAXI**\nTotal MAXI kamu: **{total_maxi_cek} pcs**.\n(Wajib kelipatan 12)\n\n⬇️ Kurangi **{kurang}** atau Tambah **{tambah}**.",
+            f"⚠️ **Kelipatan MAXI Salah**\n"
+            f"Total MAXI: **{total_maxi} pcs** — wajib kelipatan 12.\n"
+            f"⬇️ Kurangi **{sisa}** atau tambah **{12-sisa}**.",
             parse_mode="Markdown"
         )
-        return 
+        return
 
-    # === VALIDASI KELIPATAN DC (4) ===
-    total_dc = sum(item['qty'] for item in keranjang if item['kategori'] == 'DC')
+    # Validasi kelipatan DC
+    total_dc = sum(i['qty'] for i in keranjang if i['kategori'] == 'DC')
     if total_dc > 0 and total_dc % 4 != 0:
         sisa = total_dc % 4
-        kurang, tambah = sisa, 4 - sisa
         await message.answer(
-            f"⚠️ **PERINGATAN KELIPATAN DC**\nTotal Dessert Cake kamu: **{total_dc} pcs**.\n(Wajib kelipatan 4)\n\n⬇️ Kurangi **{kurang}** atau Tambah **{tambah}**.",
+            f"⚠️ **Kelipatan DC Salah**\n"
+            f"Total DC: **{total_dc} pcs** — wajib kelipatan 4.\n"
+            f"⬇️ Kurangi **{sisa}** atau tambah **{4-sisa}**.",
             parse_mode="Markdown"
         )
         return
 
-    delete_pending_order(str(message.from_user.id))
-    simpan_draft_order(str(message.from_user.id), total_maxi, keranjang)
-    
+    # Simpan ke FSM state untuk konfirmasi
+    await state.update_data(keranjang=keranjang, total_maxi=total_maxi, is_edit=is_edit)
+
+    # Preview konfirmasi
     current_user = get_current_user(str(message.from_user.id))
-    btn = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Kembali", callback_data="kembali_ke_menu")]])
-    await message.answer(f"🎉 **Draf Tersimpan untuk {current_user}!**\n*(Total MAXI: {total_maxi} pcs)*", reply_markup=btn, parse_mode="Markdown")
+    preview_items = "\n".join(
+        [f"  · {i['qty']}x {i['nama']} (T{i['tier']})" for i in keranjang]
+    )
+    teks_konfirm = (
+        f"📋 **PREVIEW PESANAN**\n"
+        f"👤 Akun: `{current_user}`\n\n"
+        f"{preview_items}\n\n"
+        f"📦 Total MAXI: **{total_maxi} pcs**\n"
+        f"🧁 Total Kue: **{total_kue} pcs**\n\n"
+        f"_Sudah benar? Klik Simpan._"
+    )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Simpan", callback_data="confirm_simpan_order"),
+         InlineKeyboardButton(text="✏️ Input Ulang", callback_data="kembali_ke_menu")]
+    ])
+    await message.answer(teks_konfirm, reply_markup=keyboard, parse_mode="Markdown")
+    await state.set_state(OrderState.confirming_order)
+
+@router.callback_query(F.data == "confirm_simpan_order")
+async def cb_confirm_simpan_order(callback: CallbackQuery, state: FSMContext):
+    """Simpan draf setelah user konfirmasi preview."""
+    data = await state.get_data()
+    keranjang  = data.get('keranjang', [])
+    total_maxi = data.get('total_maxi', 0)
+
+    if not keranjang:
+        await callback.answer("Data tidak ditemukan. Input ulang.", show_alert=True)
+        await state.clear()
+        return
+
+    # simpan_draft_order sudah atomik (delete lama + insert baru)
+    current_user = get_current_user(str(callback.from_user.id))
+    simpan_draft_order(str(callback.from_user.id), total_maxi, keranjang)
     await state.clear()
+
+    btn = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📝 Lihat Semua Draf", callback_data="menu_kelola")],
+        [InlineKeyboardButton(text="🏠 Menu Utama", callback_data="kembali_ke_menu")]
+    ])
+    await callback.message.edit_text(
+        f"✅ **Draf tersimpan untuk `{current_user}`!**\n"
+        f"📦 {total_maxi} MAXI · {len(keranjang)} produk",
+        reply_markup=btn, parse_mode="Markdown"
+    )
 
 @router.callback_query(F.data == "kembali_ke_menu")
 async def cb_kembali(callback: CallbackQuery, state: FSMContext):

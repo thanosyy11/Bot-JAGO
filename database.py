@@ -261,11 +261,20 @@ def count_accounts(telegram_id: str) -> int:
 # ============================================================
 
 def simpan_draft_order(telegram_id, total_maxi, keranjang):
+    """
+    Simpan draf pesanan untuk akun aktif.
+    Selalu REPLACE — 1 akun hanya boleh punya 1 draf PENDING.
+    """
     active_user = get_current_user(telegram_id)
     if not active_user:
         return False
     conn = sqlite3.connect(DB_NAME, timeout=10)
     cursor = conn.cursor()
+    # Hapus semua pending lama untuk akun ini dulu (aman, atomik)
+    cursor.execute(
+        "DELETE FROM draft_orders WHERE telegram_id=? AND username=? AND status='PENDING'",
+        (telegram_id, active_user)
+    )
     cursor.execute('''
         INSERT INTO draft_orders (telegram_id, username, total_maxi, payload_json)
         VALUES (?, ?, ?, ?)
@@ -275,19 +284,22 @@ def simpan_draft_order(telegram_id, total_maxi, keranjang):
     return True
 
 def get_pending_order(telegram_id):
+    """Ambil draf PENDING terbaru akun aktif, beserta info tanggalnya."""
     active_user = get_current_user(telegram_id)
     if not active_user:
         return None
     conn = sqlite3.connect(DB_NAME, timeout=10)
     cursor = conn.cursor()
     cursor.execute('''
-        SELECT id, total_maxi, payload_json FROM draft_orders
+        SELECT id, total_maxi, payload_json,
+               datetime(created_at, 'localtime') as tgl_buat
+        FROM draft_orders
         WHERE telegram_id = ? AND username = ? AND status = 'PENDING'
         ORDER BY id DESC LIMIT 1
     ''', (telegram_id, active_user))
     row = cursor.fetchone()
     conn.close()
-    return row
+    return row  # (id, total_maxi, payload_json, tgl_buat)
 
 def delete_pending_order(telegram_id):
     active_user = get_current_user(telegram_id)
@@ -303,28 +315,84 @@ def delete_pending_order(telegram_id):
     conn.close()
 
 def get_all_pending_orders_multi(telegram_id):
+    """
+    Ambil 1 draf PENDING terbaru PER AKUN.
+    Aman dari duplikat: jika ada 2 draf untuk 1 akun, ambil yang terbaru.
+    """
     conn = sqlite3.connect(DB_NAME, timeout=10)
     cursor = conn.cursor()
     cursor.execute('''
-        SELECT id, username, payload_json FROM draft_orders
-        WHERE telegram_id = ? AND status = 'PENDING'
-    ''', (telegram_id,))
+        SELECT d.id, d.username, d.payload_json
+        FROM draft_orders d
+        INNER JOIN (
+            SELECT username, MAX(id) as max_id
+            FROM draft_orders
+            WHERE telegram_id = ? AND status = 'PENDING'
+            GROUP BY username
+        ) latest ON d.id = latest.max_id
+        WHERE d.telegram_id = ?
+        ORDER BY d.id ASC
+    ''', (telegram_id, telegram_id))
     rows = cursor.fetchall()
     conn.close()
     return rows
 
 def cleanup_all_pending_orders(telegram_id):
-    """Menghapus semua draft PENDING milik telegram_id (dipakai job 09:00)."""
+    """
+    Cleanup jam 09:00: hapus draf yang dibuat SEBELUM jam 08:00 hari ini.
+    Aman: draf yang diinput setelah jam 08:00 (untuk besok) TIDAK dihapus.
+    """
     conn = sqlite3.connect(DB_NAME, timeout=10)
     cursor = conn.cursor()
-    cursor.execute(
-        "DELETE FROM draft_orders WHERE telegram_id = ? AND status = 'PENDING'",
-        (telegram_id,)
-    )
+    # Hanya hapus draf yang dibuat sebelum jam 08:00 WIB hari ini
+    # 'localtime' di SQLite = UTC+0, jadi 08:00 WIB = 01:00 UTC
+    cursor.execute('''
+        DELETE FROM draft_orders
+        WHERE telegram_id = ? AND status = 'PENDING'
+        AND created_at < datetime('now', 'start of day', '+1 hours')
+    ''', (telegram_id,))
     deleted = cursor.rowcount
     conn.commit()
     conn.close()
     return deleted
+
+def get_all_drafts_overview(telegram_id: str) -> list:
+    """
+    Untuk menu kelola: ambil status draf semua akun.
+    Return: list of (username, is_active, has_draft, total_maxi, tgl_buat)
+    """
+    conn = sqlite3.connect(DB_NAME, timeout=10)
+    cursor = conn.cursor()
+    # Semua akun terdaftar
+    cursor.execute(
+        "SELECT username, is_active FROM users WHERE telegram_id=? ORDER BY is_active DESC, username ASC",
+        (telegram_id,)
+    )
+    accounts = cursor.fetchall()
+
+    # Draf pending terbaru per akun
+    cursor.execute('''
+        SELECT d.username, d.total_maxi, datetime(d.created_at, 'localtime')
+        FROM draft_orders d
+        INNER JOIN (
+            SELECT username, MAX(id) as max_id
+            FROM draft_orders
+            WHERE telegram_id = ? AND status = 'PENDING'
+            GROUP BY username
+        ) latest ON d.id = latest.max_id
+        WHERE d.telegram_id = ?
+    ''', (telegram_id, telegram_id))
+    drafts = {row[0]: (row[1], row[2]) for row in cursor.fetchall()}
+    conn.close()
+
+    result = []
+    for username, is_active in accounts:
+        if username in drafts:
+            total_maxi, tgl_buat = drafts[username]
+            result.append((username, is_active, True, total_maxi, tgl_buat))
+        else:
+            result.append((username, is_active, False, 0, None))
+    return result
 
 
 # ============================================================
