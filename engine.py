@@ -575,7 +575,7 @@ class SiliwangiEngine:
             base_payload['orddd_lite_lockout_days']            = ' '
             base_payload['orddd_admin_url']                    = 'https://siliwangibolukukus.com/wp-admin/'
             base_payload['orddd_lite_disable_for_holidays']    = 'no'
-            base_payload['_wp_http_referer']                   = '/?wc-ajax=update_order_review'
+            base_payload['_wp_http_referer']                   = '/checkout/'
 
             # 4) ✅ Panggil update_order_review sebelum checkout final (sesuai record)
             await self._call_update_order_review(base_payload)
@@ -602,7 +602,7 @@ class SiliwangiEngine:
             # 5) POST checkout final — hanya metode 'cheque' (sesuai record)
             checkout_url = "https://siliwangibolukukus.com/?wc-ajax=checkout"
 
-            logger.info(f"💳 [{self.username}] Mencoba checkout via CHEQUE (COD)...")
+            logger.info(f"💳 [{self.username}] Mencoba checkout via CHEQUE...")
             final_res = await self._safe_request('POST', checkout_url, data=base_payload)
             if not final_res:
                 logger.error(f"💀 [{self.username}] Tidak ada respons dari server checkout.")

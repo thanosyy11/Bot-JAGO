@@ -355,7 +355,7 @@ async def cb_edit_order(callback: CallbackQuery, state: FSMContext):
 async def cb_menu_order(callback: CallbackQuery, state: FSMContext):
     current_user = get_current_user(str(callback.from_user.id))
     if not current_user:
-        await callback.answer("Tambahkan akun Siliwangi terlebih dahulu!", show_alert=True)
+        await callback.answer("Tambahkan akun terlebih dahulu!", show_alert=True)
         return
 
     template = (
