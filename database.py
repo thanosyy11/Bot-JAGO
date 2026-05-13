@@ -82,7 +82,22 @@ def init_db():
             username TEXT,
             total_maxi INTEGER,
             payload_json TEXT,
+            order_id TEXT,
             tanggal TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    try:
+        cursor.execute("ALTER TABLE order_history ADD COLUMN order_id TEXT;")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+
+    # Tabel engine_ready_status
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS engine_ready_status (
+            telegram_id TEXT,
+            username TEXT,
+            is_ready INTEGER DEFAULT 0,
+            PRIMARY KEY (telegram_id, username)
         )
     ''')
 
@@ -99,27 +114,28 @@ def init_db():
 
     products = [
         # === MAXI Tier 1 ===
-        (13463,  "MAXI Belgian Chocolate",       "MAXI", 1),
-        (13465,  "MAXI Black Forest",             "MAXI", 1),
-        (227187, "MAXI Cokelat Dubai Pistachio",  "MAXI", 1),
-        (227188, "MAXI Cokelat Tiramisu",         "MAXI", 1),
-        (13479,  "MAXI Brownies Coklat",          "MAXI", 1),
+        (251993, "MAXI Belgian Chocolate",       "MAXI", 1),
+        (36124,  "MAXI Black Forest",             "MAXI", 1),
+        (281180, "MAXI Cokelat Dubai Pistachio",  "MAXI", 1),
+        (168132, "MAXI Cokelat Tiramisu",         "MAXI", 1),
+        (312,    "MAXI Brownies Coklat",          "MAXI", 1),
         # === MAXI Tier 2 ===
-        (13476,  "MAXI Susu Lembang",             "MAXI", 2),
-        (13467,  "MAXI Pandan Wangi",             "MAXI", 2),
-        (13471,  "MAXI Red Velvet",               "MAXI", 2),
-        (13478,  "MAXI Talas Bogor",              "MAXI", 2),
-        (205949, "MAXI Durian Musang King",       "MAXI", 2),
+        (306,    "MAXI Susu Lembang",             "MAXI", 2),
+        (19077,  "MAXI Pandan Wangi",             "MAXI", 2),
+        (24883,  "MAXI Red Velvet",               "MAXI", 2),
+        (313,    "MAXI Talas Bogor",              "MAXI", 2),
+        (168131, "MAXI Durian Musang King",       "MAXI", 2),
         # === MAXI Tier 3 ===
-        (13469,  "MAXI Alpukat Mentega",          "MAXI", 3),
-        (13473,  "MAXI Keju Cheddar",             "MAXI", 3),
-        (210722, "MAXI Black Pink",               "MAXI", 3),
-        (177113, "MAXI Durian Montong",           "MAXI", 3),
-        (13475,  "MAXI Mangga Indramayu",         "MAXI", 3),
-        (219754, "MAXI Original Lapis",           "MAXI", 3),
+        (311,    "MAXI Alpukat Mentega",          "MAXI", 3),
+        (74878,  "MAXI Keju Cheddar",             "MAXI", 3),
+        (132503, "MAXI Black Pink",               "MAXI", 3),
+        (58972,  "MAXI Durian Montong",           "MAXI", 3),
+        (315,    "MAXI Mangga Indramayu",         "MAXI", 3),
+        (219722, "MAXI Original Lapis",           "MAXI", 3),
         # === Dessert Cake (DC) Tier 1 ===
-        (65017,  "DC Belgian Chocolate",          "DC",   1),
-        (65022,  "DC Black Forest",               "DC",   1),
+        (206125, "DC Belgian Chocolate",          "DC",   1),
+        (54383,  "DC Black Forest",               "DC",   1),
+        (54386,  "DC Red Velvet",                 "DC",   1),        
         # === Kemasan ===
         (70867,  "Plastik Bolu Klasik HD Isi 3 Box",  "PLASTIK", 0),
         (137748, "Plastik Bakpia Kukus HD Isi 3 Box",  "PLASTIK", 0),
@@ -137,6 +153,27 @@ def init_db():
     conn.commit()
     conn.close()
     print("[OK] Database berhasil diinisialisasi & dimigrasi")
+
+
+def set_engine_ready_status(telegram_id: str, username: str, is_ready: bool):
+    conn = sqlite3.connect(DB_NAME, timeout=10)
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO engine_ready_status (telegram_id, username, is_ready)
+        VALUES (?, ?, ?)
+        ON CONFLICT(telegram_id, username) DO UPDATE SET is_ready=?
+    ''', (telegram_id, username, int(is_ready), int(is_ready)))
+    conn.commit()
+    conn.close()
+
+
+def get_engine_ready_status(telegram_id: str, username: str) -> bool:
+    conn = sqlite3.connect(DB_NAME, timeout=10)
+    cursor = conn.cursor()
+    cursor.execute("SELECT is_ready FROM engine_ready_status WHERE telegram_id=? AND username=?", (telegram_id, username))
+    row = cursor.fetchone()
+    conn.close()
+    return bool(row[0]) if row else False
 
 
 def save_user_credentials(telegram_id, username, password):

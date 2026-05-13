@@ -27,6 +27,9 @@ logger = logging.getLogger(__name__)
 DB_NAME = "siliwangi_bot.db"
 
 
+class CloudflareBlockException(Exception):
+    pass
+
 class SiliwangiEngine:
     def __init__(self, telegram_id, username):
         self.telegram_id = telegram_id
@@ -36,6 +39,11 @@ class SiliwangiEngine:
         self.security_nonce = None
         self.order_id = None
         self.step_log = []
+
+        # Session recovery tracking
+        self.last_session_check_at = None
+        self.reconnect_attempt = 0
+        self.max_reconnect_attempts = 2
 
         # ============================================================
         # User-Agent disesuaikan dengan record tracking (Chromium 145)
@@ -90,6 +98,21 @@ class SiliwangiEngine:
                 else:
                     res = await self.client.post(url, **kwargs)
 
+                # Cek Cloudflare
+                if res.headers.get('cf-mitigated') or "Just a moment" in res.text[:300] or "Checking your browser" in res.text[:300]:
+                    logger.error(f"🚨 [{self.username}] Terblokir Cloudflare di {url}!")
+                    raise CloudflareBlockException("Terblokir oleh Cloudflare.")
+
+                if res.status_code == 403:
+                    logger.error(f"🚨 [{self.username}] Bot diblokir server (403 Forbidden).")
+                    raise CloudflareBlockException("Diblokir Server (403).")
+
+                if res.status_code == 429:
+                    retry_after = int(res.headers.get("Retry-After", 5))
+                    logger.warning(f"⚠️ [{self.username}] Rate limited (429). Tunggu {retry_after} detik.")
+                    await asyncio.sleep(retry_after)
+                    continue
+
                 if res.status_code in [500, 502, 503, 504]:
                     logger.warning(f"Server {res.status_code}. Percobaan {attempt}/{max_retries}...")
                     if attempt < max_retries:
@@ -103,6 +126,42 @@ class SiliwangiEngine:
                     continue
                 return None
         return None
+
+    async def _safe_request_with_recovery(self, method, url, max_retries=4, **kwargs):
+        """
+        Wrapper untuk _safe_request() dengan auto-reconnect logic.
+        Jika error 302/401/timeout, coba re-login & retry sekali.
+        """
+        try:
+            res = await self._safe_request(method, url, max_retries=max_retries, **kwargs)
+
+            # Cek jika error 301/302/401 (session invalid) - 403 sudah ditangani
+            if res and res.status_code in [301, 302, 401]:
+                logger.warning(f"🔄 [{self.username}] Terdeteksi error {res.status_code}, coba reconnect...")
+
+                if self.reconnect_attempt < self.max_reconnect_attempts:
+                    self.reconnect_attempt += 1
+
+                    # Clear cookies & re-login
+                    clear_session_cookies(self.telegram_id, self.username)
+                    logger.info(f"🔄 [{self.username}] Reconnect attempt {self.reconnect_attempt}/{self.max_reconnect_attempts}...")
+
+                    if await self.login():
+                        logger.info(f"✅ [{self.username}] Reconnected successfully, retrying request...")
+                        # Retry sekali saja
+                        res = await self._safe_request(method, url, max_retries=2, **kwargs)
+                        return res
+                    else:
+                        logger.error(f"❌ [{self.username}] Re-login failed")
+                        return res
+
+            return res
+
+        except CloudflareBlockException:
+            raise
+        except Exception as e:
+            logger.error(f"Error di _safe_request_with_recovery [{self.username}]: {e}")
+            return None
 
     def _get_credentials(self):
         conn = sqlite3.connect(DB_NAME, timeout=10)
@@ -126,24 +185,60 @@ class SiliwangiEngine:
         """Muat cookies tersimpan dari DB ke httpx client."""
         saved = load_session_cookies(self.telegram_id, self.username)
         if saved:
-            for name, value in saved.items():
-                self.client.cookies.set(name, value)
-            logger.info(f"🔑 [{self.username}] {len(saved)} cookies dimuat dari DB.")
+            if isinstance(saved, list):
+                for c in saved:
+                    self.client.cookies.set(
+                        c['name'], c['value'],
+                        domain=c.get('domain', ''),
+                        path=c.get('path', '/')
+                    )
+            else:
+                for name, value in saved.items():
+                    self.client.cookies.set(name, value)
+            logger.info(f"🔑 [{self.username}] Cookies dimuat dari DB.")
+            self._session_is_valid()
 
     def _session_is_valid(self) -> bool:
-        """Cek apakah client sudah punya cookies login WooCommerce aktif."""
-        return any(
-            'wordpress_logged_in' in k or 'wordpress_sec' in k
+        """
+        Cek apakah session masih valid.
+        Dulu: hanya check cookies key
+        Baru: check cookies + timestamp (re-validate setiap 5 min)
+        """
+        # Check basic cookies
+        has_wp_cookie = any(
+            'wordpress_logged_in' in k or 'wordpress_sec' in k or 'wp_woocommerce_session_' in k
             for k in dict(self.client.cookies).keys()
         )
+        if not has_wp_cookie:
+            return False
+
+        # Check timestamp: re-validate setiap 5 menit
+        now = datetime.now()
+        if self.last_session_check_at:
+            age = (now - self.last_session_check_at).total_seconds()
+            if age < 300:  # 5 menit
+                return True  # Masih fresh
+
+        # Need to refresh: do actual test GET /my-account/
+        logger.debug(f"🔍 [{self.username}] Validating session freshness...")
+        return False  # Will trigger re-validation in caller
 
     def _save_cookies(self):
-        """Simpan cookies httpx saat ini ke DB."""
+        """Simpan cookies httpx saat ini ke DB dan update timestamp."""
         try:
-            cookies_dict = {k: v for k, v in self.client.cookies.items()}
-            if cookies_dict:
-                save_session_cookies(self.telegram_id, self.username, cookies_dict)
-                logger.info(f"💾 [{self.username}] {len(cookies_dict)} cookies disimpan ke DB.")
+            cookies_list = []
+            for cookie in self.client.cookies.jar:
+                cookies_list.append({
+                    'name': cookie.name,
+                    'value': cookie.value,
+                    'domain': cookie.domain,
+                    'path': cookie.path,
+                    'secure': cookie.secure
+                })
+            if cookies_list:
+                save_session_cookies(self.telegram_id, self.username, cookies_list)
+                self.last_session_check_at = datetime.now()  # Update timestamp
+                logger.info(f"💾 [{self.username}] {len(cookies_list)} cookies disimpan ke DB (session fresh).")
         except Exception as e:
             logger.warning(f"⚠️ Gagal simpan cookies [{self.username}]: {e}")
 
@@ -279,7 +374,8 @@ class SiliwangiEngine:
         url = "https://siliwangibolukukus.com/?wc-ajax=add_to_cart"
 
         try:
-            res = await self._safe_request('POST', url, data={
+            ajax_headers = {"X-Requested-With": "XMLHttpRequest", "Accept": "application/json"}
+            res = await self._safe_request('POST', url, headers=ajax_headers, data={
                 "product_id": str(prod_id),
                 "quantity":   str(qty)
             })
@@ -288,6 +384,11 @@ class SiliwangiEngine:
 
             try:
                 data = res.json()
+            except ValueError:
+                logger.error(f"❌ [{self.username}] Respons add_to_cart bukan JSON. Kemungkinan redirect.")
+                return False, 0
+                
+            try:
                 # Sukses penuh
                 if 'fragments' in data or 'cart_hash' in data:
                     return True, qty
@@ -299,7 +400,7 @@ class SiliwangiEngine:
                     available = self._parse_available_stock(err_txt)
                     if available and 0 < available < qty:
                         logger.info(f"📦 Stok parsial terdeteksi: {available}x tersedia untuk ID {prod_id}")
-                        res2 = await self._safe_request('POST', url, data={
+                        res2 = await self._safe_request('POST', url, headers=ajax_headers, data={
                             "product_id": str(prod_id),
                             "quantity":   str(available)
                         })
@@ -466,8 +567,13 @@ class SiliwangiEngine:
         2. security nonce                       → untuk POST ?wc-ajax=update_order_review
         """
         try:
-            res = await self._safe_request('GET', "https://siliwangibolukukus.com/checkout/")
+            res = await self._safe_request('GET', "https://siliwangibolukukus.com/checkout/", follow_redirects=False)
             if not res:
+                return False
+
+            if res.status_code in [301, 302]:
+                loc = res.headers.get("Location", "")
+                logger.error(f"❌ [{self.username}] Cart kosong atau session expired, redirect ke {loc}")
                 return False
 
             soup = BeautifulSoup(res.text, 'html.parser')
@@ -590,7 +696,8 @@ class SiliwangiEngine:
                 review_payload[review_key] = base_payload[form_key]
 
         try:
-            res = await self._safe_request('POST', url, data=review_payload)
+            ajax_headers = {"X-Requested-With": "XMLHttpRequest", "Accept": "application/json"}
+            res = await self._safe_request_with_recovery('POST', url, headers=ajax_headers, data=review_payload)
             if res and res.status_code == 200:
                 logger.info(f"✅ [{self.username}] update_order_review berhasil (200 OK).")
                 return True
@@ -609,6 +716,7 @@ class SiliwangiEngine:
     async def execute_order(self, dry_run: bool = False):
         """Eksekusi order lengkap. Jika dry_run=True, berhenti sebelum POST checkout."""
         self.step_log = []  # Reset log setiap eksekusi
+        self.reconnect_attempt = 0  # Reset reconnect counter untuk order baru
         self._step("🔑", "Memulai", "dry run" if dry_run else "WAR")
 
         logger.info(f"🔑 [{self.username}] Mengamankan sesi login...")
@@ -687,7 +795,7 @@ class SiliwangiEngine:
     async def _process_checkout(self, dry_run: bool = False):
         try:
             # 1) Verifikasi keranjang tidak kosong
-            cart_res = await self._safe_request('GET', "https://siliwangibolukukus.com/cart/")
+            cart_res = await self._safe_request_with_recovery('GET', "https://siliwangibolukukus.com/cart/")
             if cart_res:
                 soup_cart = BeautifulSoup(cart_res.text, 'html.parser')
                 error_notices = soup_cart.find_all(class_=['woocommerce-error', 'error'])
@@ -703,7 +811,7 @@ class SiliwangiEngine:
                     return False
 
             # 2) Ambil halaman checkout & scrape semua field form
-            res = await self._safe_request('GET', "https://siliwangibolukukus.com/checkout/")
+            res = await self._safe_request_with_recovery('GET', "https://siliwangibolukukus.com/checkout/")
             if not res or "checkout" not in str(res.url):
                 logger.error(f"❌ [{self.username}] Terpental dari kasir: {res.url if res else 'N/A'}")
                 if res:
@@ -733,9 +841,9 @@ class SiliwangiEngine:
             bulan = ["", "Januari", "Februari", "Maret", "April", "Mei", "Juni",
                      "Juli", "Agustus", "September", "Oktober", "November", "Desember"]
 
-            str_sekarang_h = f"{sekarang.day}-{sekarang.month}-{sekarang.year}"
-            str_besok_h    = f"{besok.day}-{besok.month}-{besok.year}"
-            str_besok_e    = f"{besok.day} {bulan[besok.month]}, {besok.year}"
+            str_sekarang_h = sekarang.strftime("%d-%m-%Y")
+            str_besok_h    = besok.strftime("%d-%m-%Y")
+            str_besok_e    = f"{besok.strftime('%d')} {bulan[besok.month]}, {besok.year}"
 
             base_payload['woocommerce-process-checkout-nonce'] = self.checkout_nonce
             base_payload['payment_method']                     = 'cheque'
@@ -783,22 +891,21 @@ class SiliwangiEngine:
             checkout_url = "https://siliwangibolukukus.com/?wc-ajax=checkout"
 
             logger.info(f"💳 [{self.username}] Mencoba checkout via CHEQUE...")
-            final_res = await self._safe_request('POST', checkout_url, data=base_payload)
+            ajax_headers = {"X-Requested-With": "XMLHttpRequest", "Accept": "application/json"}
+            final_res = await self._safe_request_with_recovery('POST', checkout_url, headers=ajax_headers, data=base_payload)
             if not final_res:
                 logger.error(f"💀 [{self.username}] Tidak ada respons dari server checkout.")
                 return False
 
-            # Cek sukses via URL redirect
-            if "order-received" in str(final_res.url):
-                logger.info(f"🎉 [{self.username}] Checkout BERHASIL via redirect URL!")
-                self._mark_success()
-                return True
-
-            # Cek sukses via JSON
+            # Cek sukses via JSON terlebih dahulu
             try:
                 result = final_res.json()
                 if result.get('result') == 'success':
                     logger.info(f"🎉 [{self.username}] Checkout BERHASIL via JSON response!")
+                    redirect_url = result.get('redirect', '')
+                    m = re.search(r'/order-received/(\d+)/', redirect_url)
+                    self.order_id_woo = m.group(1) if m else "UNKNOWN"
+                    logger.info(f"🔖 [{self.username}] Order ID diekstrak: {self.order_id_woo}")
                     self._mark_success()
                     return True
                 elif result.get('result') == 'failure':
@@ -808,6 +915,15 @@ class SiliwangiEngine:
                     return False
             except Exception:
                 pass
+
+            # Cek sukses via URL redirect (fallback)
+            if "order-received" in str(final_res.url):
+                logger.info(f"🎉 [{self.username}] Checkout BERHASIL via redirect URL!")
+                m = re.search(r'/order-received/(\d+)/', str(final_res.url))
+                self.order_id_woo = m.group(1) if m else "UNKNOWN"
+                logger.warning(f"⚠️ Redirect history: {len(final_res.history)} redirects. Order ID: {self.order_id_woo}")
+                self._mark_success()
+                return True
 
             # Cek sukses via teks HTML
             if "Pesanan" in final_res.text or "Order Complete" in final_res.text:
@@ -843,9 +959,9 @@ class SiliwangiEngine:
         row = cursor.fetchone()
         if row:
             cursor.execute('''
-                INSERT INTO order_history (telegram_id, username, total_maxi, payload_json)
-                VALUES (?, ?, ?, ?)
-            ''', row)
+                INSERT INTO order_history (telegram_id, username, total_maxi, payload_json, order_id)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (row[0], row[1], row[2], row[3], getattr(self, 'order_id_woo', 'UNKNOWN')))
 
         # Hapus draft dari draft_orders (bukan hanya update status)
         cursor.execute("DELETE FROM draft_orders WHERE id=?", (self.order_id,))

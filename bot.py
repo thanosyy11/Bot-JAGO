@@ -19,9 +19,10 @@ from database import (
     get_all_accounts, set_active_account, get_all_pending_orders_multi,
     get_order_history, cleanup_all_pending_orders, init_db,
     get_all_accounts_with_status, count_accounts, clear_session_cookies,
-    get_all_drafts_overview, get_session_status
+    get_all_drafts_overview, get_session_status,
+    set_engine_ready_status, get_engine_ready_status
 )
-from engine import SiliwangiEngine
+from engine import SiliwangiEngine, CloudflareBlockException
 
 logging.basicConfig(filename='siliwangi_error.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - [BOT] %(message)s')
 logger = logging.getLogger(__name__)
@@ -57,7 +58,7 @@ async def eksekusi_dengan_jeda(engine, delay, username, dry_run=False):
 
     logger.info(f"{'[DRY RUN]' if dry_run else '[WAR]'} akun: {username} (Delay: {delay:.1f}s)")
     hasil = await engine.execute_order(dry_run=dry_run)
-    return username, hasil, engine.step_log
+    return username, hasil, engine.step_log, getattr(engine, 'order_id_woo', 'UNKNOWN')
 
 async def job_pemanasan():
     logger.info("Warm Up (07:55)...")
@@ -91,8 +92,10 @@ async def job_pemanasan():
         if await engine.login():
             mesin_siaga[ADMIN_ID][username] = engine
             berhasil_login += 1
+            set_engine_ready_status(str(ADMIN_ID), username, True)
         else:
             gagal_login.append(username)
+            set_engine_ready_status(str(ADMIN_ID), username, False)
             await engine.close()
 
     if berhasil_login > 0:
@@ -114,8 +117,21 @@ async def job_eksekusi():
     pasukan = mesin_siaga.get(ADMIN_ID, {})
 
     if not pasukan:
-        logger.info("🏖️ [MODE CUTI/GAGAL] Eksekusi dibatalkan.")
-        return
+        logger.warning("⚠️ Memori mesin_siaga kosong, memuat fallback dari database...")
+        orders = get_all_pending_orders_multi(str(ADMIN_ID))
+        if orders:
+            mesin_siaga[ADMIN_ID] = {}
+            for order in orders:
+                username = order[1]
+                if get_engine_ready_status(str(ADMIN_ID), username):
+                    engine = SiliwangiEngine(telegram_id=str(ADMIN_ID), username=username)
+                    mesin_siaga[ADMIN_ID][username] = engine
+            pasukan = mesin_siaga.get(ADMIN_ID, {})
+            
+        if not pasukan:
+            logger.error("🚨 DATABASE JUGA KOSONG: Bot akan membatalkan WAR.")
+            await bot.send_message(ADMIN_ID, "🚨 **[DARURAT]** Memori kosong & pemulihan DB gagal. WAR dibatalkan!")
+            return
 
     logger.info(f"🚀 MEMULAI WAR {len(pasukan)} AKUN!")
 
@@ -135,7 +151,7 @@ async def job_eksekusi():
                 f"🧪 **[DRY RUN] LAPORAN SIMULASI 08:00 WIB**\n"
                 f"_{len(pasukan)} akun diuji — checkout TIDAK dieksekusi_\n\n"
             )
-            for target_username, is_success, step_log in hasil_perang:
+            for target_username, is_success, step_log, order_id_woo in hasil_perang:
                 status_icon = "✅" if is_success else "❌"
                 laporan += f"{'─'*30}\n"
                 laporan += f"👤 `{target_username}` {status_icon}\n"
@@ -151,11 +167,21 @@ async def job_eksekusi():
         else:
             # ─── Laporan WAR biasa ───────────────────────────────────────────
             laporan = "📊 **HASIL WAR 08:00 WIB:**\n\n"
-            for target_username, is_success, step_log in hasil_perang:
+            for target_username, is_success, step_log, order_id_woo in hasil_perang:
                 status = "✅ BERHASIL" if is_success else "❌ GAGAL/HABIS"
+                if is_success and order_id_woo != "UNKNOWN":
+                    status += f" (Order ID: `{order_id_woo}`)"
                 laporan += f"👤 `{target_username}`: {status}\n"
 
-        for target_username, is_success, step_log in hasil_perang:
+                # Jika gagal, extract error reason dari step_log
+                if not is_success and step_log:
+                    error_lines = [line for line in step_log if any(icon in line for icon in ["❌", "⚠️"])]
+                    if error_lines:
+                        # Ambil yang paling recent (biasanya yang terakhir adalah root cause)
+                        error_reason = error_lines[-1][:80]  # Max 80 char
+                        laporan += f"   └─ {error_reason}\n"
+
+        for target_username, is_success, step_log, order_id_woo in hasil_perang:
             engine = pasukan.get(target_username)
             if engine:
                 await engine.close()
@@ -164,6 +190,19 @@ async def job_eksekusi():
         await bot.send_message(ADMIN_ID, laporan, parse_mode="Markdown")
         logger.info("War/DryRun Selesai.")
 
+    except CloudflareBlockException as e:
+        pesan_error = "🚨 **[CLOUDFLARE BLOCK]** Bot terdeteksi oleh Cloudflare dan tidak dapat memproses request! Mohon periksa IP atau jaringan."
+        logger.error(f"CLOUDFLARE ERROR saat job_eksekusi: {e}")
+        try:
+            await bot.send_message(ADMIN_ID, pesan_error, parse_mode="Markdown")
+        except Exception:
+            pass
+        for engine in pasukan.values():
+            try:
+                await engine.close()
+            except Exception:
+                pass
+        mesin_siaga.pop(ADMIN_ID, None)
     except Exception as e:
         pesan_error = (
             f"🚨 **[FATAL ERROR] {'DRY RUN' if DRY_RUN_MODE else 'WAR'} CRASH!**\n\n"
@@ -301,6 +340,10 @@ async def cmd_help(message: Message):
         "💡 _Buka 📖 Tutorial untuk panduan lengkap._"
     )
     await message.answer(teks, reply_markup=get_main_menu_keyboard(), parse_mode="Markdown")
+@router.message(Command("batal", "cancel"))
+async def cmd_cancel(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("✅ Proses dibatalkan. Kembali ke menu utama.", reply_markup=get_main_menu_keyboard())
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
