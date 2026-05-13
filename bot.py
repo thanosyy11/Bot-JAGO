@@ -27,7 +27,9 @@ from engine import SiliwangiEngine, CloudflareBlockException
 logging.basicConfig(filename='siliwangi_error.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - [BOT] %(message)s')
 logger = logging.getLogger(__name__)
 
-load_dotenv()
+# Load .env explicitly from the same directory as this script
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(BASE_DIR, '.env'))
 BOT_TOKEN  = os.getenv("BOT_TOKEN")
 ADMIN_ID   = int(os.getenv("ADMIN_ID"))
 DRY_RUN_MODE = os.getenv("DRY_RUN", "false").lower() == "true"
@@ -698,7 +700,18 @@ async def process_password(message: Message, state: FSMContext):
         return
         
     data = await state.get_data()
-    save_user_credentials(str(message.from_user.id), data['username'], message.text)
+    try:
+        save_user_credentials(str(message.from_user.id), data['username'], message.text)
+    except RuntimeError as e:
+        await message.answer(f"❌ **Gagal menyimpan akun:**\n{e}", parse_mode="Markdown")
+        await state.clear()
+        return
+    except Exception as e:
+        logger.error(f"Error save_user_credentials: {e}")
+        await message.answer("❌ **Terjadi kesalahan sistem saat menyimpan akun.**", parse_mode="Markdown")
+        await state.clear()
+        return
+        
     await state.clear()
     
     btn = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Kembali ke Dasbor", callback_data="kembali_ke_menu")]])
@@ -883,6 +896,9 @@ async def process_template(message: Message, state: FSMContext):
 async def _proses_input_order(message: Message, state: FSMContext, is_edit: bool = False):
     """Core logic parse + validasi + preview konfirmasi input pesanan."""
     products_db = get_all_products_dict()
+    # Buat lookup case-insensitive
+    products_db_lower = {k.lower(): (k, v) for k, v in products_db.items()}
+    
     lines = message.text.strip().split('\n')
     keranjang = []
     total_maxi = 0
@@ -895,19 +911,20 @@ async def _proses_input_order(message: Message, state: FSMContext, is_edit: bool
         try:
             parts = line.split('x ', 1)
             qty = int(parts[0].replace('-', '').strip())
-            nama_produk = parts[1].strip()
+            nama_produk_raw = parts[1].strip()
+            nama_produk_lower = nama_produk_raw.lower()
             if qty <= 0:
                 continue
-            if nama_produk in products_db:
-                prod_info = products_db[nama_produk]
+            if nama_produk_lower in products_db_lower:
+                nama_produk_asli, prod_info = products_db_lower[nama_produk_lower]
                 keranjang.append({
-                    "id": prod_info["id"], "nama": nama_produk,
+                    "id": prod_info["id"], "nama": nama_produk_asli,
                     "qty": qty, "kategori": prod_info["kategori"], "tier": prod_info["tier"]
                 })
                 if prod_info["kategori"] == "MAXI":
                     total_maxi += qty
             else:
-                baris_tidak_dikenal.append(f"`{nama_produk}`")
+                baris_tidak_dikenal.append(f"`{nama_produk_raw}`")
         except Exception:
             pass
 
