@@ -150,11 +150,11 @@ async def job_eksekusi():
 
     try:
         tasks = []
-        jeda = 0.0
+        # Gunakan delay sangat kecil (jitter) agar semua akun hit hampir bersamaan tapi tetap teratur
+        delay_total = 0.0
         for username, engine in pasukan.items():
-            tasks.append(eksekusi_dengan_jeda(engine, jeda, username, dry_run=DRY_RUN_MODE))
-            # Delay random 2.0-3.5 detik antar akun (lebih manusiawi, hindari spam)
-            jeda += random.uniform(2.0, 3.5)
+            tasks.append(eksekusi_dengan_jeda(engine, delay_total, username, dry_run=DRY_RUN_MODE))
+            delay_total += random.uniform(0.1, 0.3) 
 
         hasil_perang = await asyncio.gather(*tasks)
 
@@ -674,17 +674,25 @@ async def cb_siapkan_semua(callback: CallbackQuery):
     )
 
     mesin_siaga[ADMIN_ID] = {}
-    berhasil = 0
-    gagal = []
-    for order in orders:
-        username = order[1]
-        engine = SiliwangiEngine(telegram_id=str(ADMIN_ID), username=username)
-        if await engine.login():
-            mesin_siaga[ADMIN_ID][username] = engine
-            berhasil += 1
-        else:
-            gagal.append(username)
-            await engine.close()
+    
+    async def _login_task(username):
+        try:
+            engine = SiliwangiEngine(telegram_id=tid, username=username)
+            if await engine.login():
+                mesin_siaga[ADMIN_ID][username] = engine
+                return True, username
+            else:
+                await engine.close()
+                return False, username
+        except Exception:
+            return False, username
+
+    # Paralel login biar cepat
+    tasks = [_login_task(o[1]) for o in orders]
+    results = await asyncio.gather(*tasks)
+    
+    berhasil = sum(1 for r in results if r[0])
+    gagal = [r[1] for r in results if not r[0]]
 
     baris_hasil = f"✅ **{berhasil}/{len(orders)} akun berhasil disiapkan!**"
     if gagal:
@@ -1001,7 +1009,7 @@ async def cb_confirm_simpan_order(callback: CallbackQuery, state: FSMContext):
     await state.clear()
 
     btn = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📝 Lihat Semua Draf", callback_data="menu_kelola")],
+        [InlineKeyboardButton(text="📝 Lihat Semua Draf", callback_data="menu_order")],
         [InlineKeyboardButton(text="🏠 Menu Utama", callback_data="kembali_ke_menu")]
     ])
     await callback.message.edit_text(
@@ -1010,24 +1018,6 @@ async def cb_confirm_simpan_order(callback: CallbackQuery, state: FSMContext):
         reply_markup=btn, parse_mode="Markdown"
     )
 
-@router.callback_query(F.data == "kembali_ke_menu")
-async def cb_kembali(callback: CallbackQuery, state: FSMContext):
-    if hasattr(state, 'clear'):
-        await state.clear()
-        
-    current_user = get_current_user(str(callback.from_user.id))
-    status_akun = f"{current_user}" if current_user else "Belum Ada Akun"
-    
-    teks = (
-        f"🤖 **Bot JAGO**\n\n"
-        f"🟢 **Akun Aktif:** `{status_akun}`\n\n"
-        f"*(Input pesanan akan otomatis masuk ke Akun Aktif)*"
-    )
-    try:
-        await callback.message.edit_text(teks, reply_markup=get_main_menu_keyboard(), parse_mode="Markdown")
-    except Exception:
-        pass
-    await callback.answer()
 
 async def main():
     init_db() 
