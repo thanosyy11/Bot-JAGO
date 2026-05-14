@@ -743,8 +743,6 @@ async def process_password(message: Message, state: FSMContext):
     btn = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Kembali ke Dasbor", callback_data="kembali_ke_menu")]])
     await message.answer(f"✅ **Akun Berhasil Ditambahkan!**\n(`{data['username']}`)", reply_markup=btn, parse_mode="Markdown")
 
-@router.callback_query(F.data == "menu_status")
-async def cb_menu_status(callback: CallbackQuery):
 
 @router.callback_query(F.data == "lihat_riwayat")
 async def cb_lihat_riwayat(callback: CallbackQuery):
