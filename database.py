@@ -11,12 +11,14 @@ DB_NAME = "siliwangi_bot.db"
 def _get_fernet():
     key = os.getenv("ENCRYPTION_KEY")
     if not key:
-        raise RuntimeError(
-            "❌ ENCRYPTION_KEY tidak ditemukan di .env!\n"
-            "Generate key dengan: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\"\n"
-            "Lalu tambahkan ke .env: ENCRYPTION_KEY=<hasil_generate>"
-        )
-    return Fernet(key.encode())
+        # Jika belum ada di env, coba generate/load otomatis
+        key = ensure_encryption_key()
+        
+    try:
+        return Fernet(key.encode())
+    except Exception as e:
+        logger.error(f"❌ ENCRYPTION_KEY tidak valid: {e}")
+        raise RuntimeError("ENCRYPTION_KEY di .env tidak valid. Silakan hapus baris tersebut agar digenerate ulang.")
 
 def encrypt_password(plaintext: str) -> str:
     try:
@@ -35,7 +37,41 @@ def decrypt_password(encrypted: str) -> str:
         return encrypted
 
 
+def ensure_encryption_key():
+    """Memastikan ENCRYPTION_KEY ada di .env. Jika tidak, buat otomatis."""
+    key = os.getenv("ENCRYPTION_KEY")
+    if key:
+        return key
+
+    env_path = ".env"
+    
+    # Cek isi file secara manual
+    if os.path.exists(env_path):
+        with open(env_path, "r") as f:
+            for line in f:
+                if line.strip().startswith("ENCRYPTION_KEY="):
+                    val = line.split("=", 1)[1].strip().strip("'").strip('"')
+                    if val:
+                        os.environ["ENCRYPTION_KEY"] = val
+                        return val
+
+    # Generate baru
+    new_key = Fernet.generate_key().decode()
+    logger.info("🔑 ENCRYPTION_KEY tidak ditemukan. Membuat key baru...")
+    
+    mode = "a" if os.path.exists(env_path) else "w"
+    with open(env_path, mode) as f:
+        if mode == "a":
+            f.write("\n")
+        f.write(f"ENCRYPTION_KEY={new_key}\n")
+    
+    os.environ["ENCRYPTION_KEY"] = new_key
+    return new_key
+
 def init_db():
+    # Pastikan key ada sebelum melakukan apa pun
+    ensure_encryption_key()
+    
     conn = sqlite3.connect(DB_NAME, timeout=10)
     cursor = conn.cursor()
     
