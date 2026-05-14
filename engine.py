@@ -206,8 +206,8 @@ class SiliwangiEngine:
         """
         # Check basic cookies
         has_wp_cookie = any(
-            'wordpress_logged_in' in k or 'wordpress_sec' in k or 'wp_woocommerce_session_' in k
-            for k in dict(self.client.cookies).keys()
+            'wordpress_logged_in' in cookie.name or 'wordpress_sec' in cookie.name or 'wp_woocommerce_session_' in cookie.name
+            for cookie in self.client.cookies.jar
         )
         if not has_wp_cookie:
             return False
@@ -760,21 +760,22 @@ class SiliwangiEngine:
         if maxi_items:
             await self._smart_maxi_fill(maxi_items)
 
-        # DC: independen, tidak boleh tukar dengan MAXI
-        for item in dc_items:
+        # ── DC & PLASTIK: Tambah secara PARALEL untuk kecepatan ───────────
+        async def _add_item_task(item, fallback_msg):
             ok, added = await self._add_to_cart(item['id'], item['qty'])
             if ok:
                 self._step("🛒", f"{added}x {item['nama']}", "Masuk")
             else:
-                self._step("⚠️", f"{item['qty']}x {item['nama']}", "DC HABIS (no fallback)")
+                self._step("⚠️", f"{item['qty']}x {item['nama']}", fallback_msg)
 
-        # PLASTIK: Tier 0, skip jika habis (tidak ada fallback)
+        tasks = []
+        for item in dc_items:
+            tasks.append(_add_item_task(item, "DC HABIS (no fallback)"))
         for item in plastik_items:
-            ok, added = await self._add_to_cart(item['id'], item['qty'])
-            if ok:
-                self._step("🛒", f"{added}x {item['nama']}", "Masuk")
-            else:
-                self._step("⚠️", f"{item['nama']}", "Plastik SKIP (Tier 0, tidak ada pengganti)")
+            tasks.append(_add_item_task(item, "Plastik SKIP (Tier 0)"))
+        
+        if tasks:
+            await asyncio.gather(*tasks)
 
         if not await self.get_checkout_nonce():
             self._step("❌", "Checkout Nonce", "Tidak ditemukan")
@@ -906,7 +907,10 @@ class SiliwangiEngine:
                     m = re.search(r'/order-received/(\d+)/', redirect_url)
                     self.order_id_woo = m.group(1) if m else "UNKNOWN"
                     logger.info(f"🔖 [{self.username}] Order ID diekstrak: {self.order_id_woo}")
-                    self._mark_success()
+                    try:
+                        self._mark_success()
+                    except Exception as e:
+                        logger.warning(f"⚠️ Gagal membersihkan draf setelah sukses: {e}")
                     return True
                 elif result.get('result') == 'failure':
                     messages = result.get('messages', '')

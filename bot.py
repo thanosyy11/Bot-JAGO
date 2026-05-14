@@ -88,17 +88,28 @@ async def job_pemanasan():
     berhasil_login = 0
     gagal_login = []
 
-    for order in orders:
-        username = order[1]
-        engine = SiliwangiEngine(telegram_id=str(ADMIN_ID), username=username)
-        if await engine.login():
-            mesin_siaga[ADMIN_ID][username] = engine
-            berhasil_login += 1
-            set_engine_ready_status(str(ADMIN_ID), username, True)
-        else:
-            gagal_login.append(username)
-            set_engine_ready_status(str(ADMIN_ID), username, False)
-            await engine.close()
+    async def _login_task(username):
+        nonlocal berhasil_login
+        try:
+            engine = SiliwangiEngine(telegram_id=str(ADMIN_ID), username=username)
+            if await engine.login():
+                mesin_siaga[ADMIN_ID][username] = engine
+                berhasil_login += 1
+                set_engine_ready_status(str(ADMIN_ID), username, True)
+                return True
+            else:
+                gagal_login.append(username)
+                set_engine_ready_status(str(ADMIN_ID), username, False)
+                await engine.close()
+                return False
+        except Exception as e:
+            logger.error(f"Error fatal warm-up {username}: {e}", exc_info=True)
+            gagal_login.append(f"{username} (CRASH)")
+            return False
+
+    # Eksekusi login secara PARALEL untuk kecepatan
+    tasks = [_login_task(order[1]) for order in orders]
+    await asyncio.gather(*tasks)
 
     if berhasil_login > 0:
         status_txt = f"✅ Login berhasil: **{berhasil_login}/{len(orders)} akun**"

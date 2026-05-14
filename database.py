@@ -38,6 +38,13 @@ def decrypt_password(encrypted: str) -> str:
 def init_db():
     conn = sqlite3.connect(DB_NAME, timeout=10)
     cursor = conn.cursor()
+    
+    # Fungsi bantu migrasi kolom
+    def add_column_if_missing(table, column, definition):
+        try:
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition};")
+        except sqlite3.OperationalError:
+            pass
 
     # Tabel produk
     cursor.execute('''
@@ -86,10 +93,11 @@ def init_db():
             tanggal TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    try:
-        cursor.execute("ALTER TABLE order_history ADD COLUMN order_id TEXT;")
-    except sqlite3.OperationalError:
-        pass  # Column already exists
+    # Jalankan migrasi jika tabel sudah ada tapi kolom belum lengkap
+    add_column_if_missing("users", "is_active", "INTEGER DEFAULT 0")
+    add_column_if_missing("draft_orders", "total_maxi", "INTEGER")
+    add_column_if_missing("draft_orders", "created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+    add_column_if_missing("order_history", "order_id", "TEXT")
 
     # Tabel engine_ready_status
     cursor.execute('''
