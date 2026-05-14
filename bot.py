@@ -326,50 +326,65 @@ scheduler.add_job(job_bersihkan_draft, 'cron', hour=9,  minute=0,  second=0)
 
 def get_main_menu_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📦 Input Pesanan", callback_data="menu_order")],
-        [InlineKeyboardButton(text="👥 Kelola Multi-Akun", callback_data="menu_akun")],
-        [InlineKeyboardButton(text="📝 Pesanan & Kelola", callback_data="menu_kelola")],
-        [InlineKeyboardButton(text="📊 Status", callback_data="menu_status")],
-        [InlineKeyboardButton(text="📖 Tutorial & Panduan", callback_data="tutorial:1")],
+        [InlineKeyboardButton(text="👥 Kelola Akun", callback_data="menu_akun"),
+         InlineKeyboardButton(text="📦 Susun Pesanan", callback_data="menu_order")],
+        [InlineKeyboardButton(text="🚀 SIAPKAN WAR SEKARANG", callback_data="siapkan_semua")],
+        [InlineKeyboardButton(text="📖 Panduan", callback_data="tutorial:1"),
+         InlineKeyboardButton(text="📜 Riwayat", callback_data="lihat_riwayat")],
     ])
 
 @router.message(Command("help"))
 async def cmd_help(message: Message):
     teks = (
-        "🤖 **Bot JAGO — Perintah Tersedia**\n\n"
-        "/start — Buka menu utama\n"
-        "/help — Tampilkan pesan ini\n\n"
-        "**Navigasi via tombol:**\n"
-        "• 📦 Input Pesanan — input order template\n"
-        "• 👥 Kelola Multi-Akun — tambah/login/reset akun\n"
-        "• 📝 Pesanan & Kelola — lihat semua draf + riwayat\n"
-        "• 📊 Status — ringkasan draf saat ini\n"
-        "• 📖 Tutorial — panduan lengkap 7 halaman\n\n"
-        "**Jadwal otomatis (tidak perlu manual):**\n"
-        "• `07:00` → Health check website + session\n"
-        "• `07:55` → Warm-up login semua akun\n"
-        "• `08:00` → Eksekusi order (War)\n"
-        "• `09:00` → Cleanup draft\n\n"
-        "💡 _Buka 📖 Tutorial untuk panduan lengkap._"
+        "🤖 **Bot JAGO — Panduan Cepat**\n\n"
+        "1. **Kelola Akun:** Tambah & login akun Siliwangi.\n"
+        "2. **Susun Pesanan:** Input draf item yang akan di-war.\n"
+        "3. **Siapkan War:** Cek sesi login & kesiapan draf.\n\n"
+        "⏰ **Jadwal Otomatis:**\n"
+        "• `07:55` → Warm-up (Auto Login)\n"
+        "• `08:00` → Eksekusi War\n\n"
+        "💡 _Gunakan menu di bawah untuk navigasi._"
     )
     await message.answer(teks, reply_markup=get_main_menu_keyboard(), parse_mode="Markdown")
+
 @router.message(Command("batal", "cancel"))
 async def cmd_cancel(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer("✅ Proses dibatalkan. Kembali ke menu utama.", reply_markup=get_main_menu_keyboard())
+    await message.answer("✅ Dibatalkan.", reply_markup=get_main_menu_keyboard())
 
 @router.message(CommandStart())
-async def cmd_start(message: Message, state: FSMContext):
-    await state.clear()
-    current_user = get_current_user(str(message.from_user.id))
-    status_akun = f"{current_user}" if current_user else "Belum Ada Akun"
+@router.callback_query(F.data == "kembali_ke_menu")
+async def cmd_start(event, state: FSMContext = None):
+    if state: await state.clear()
+    
+    user_id = str(event.from_user.id if isinstance(event, Message) else event.from_user.id)
+    drafts = get_all_drafts_overview(user_id)
+    current_user = get_current_user(user_id)
+    
+    status_text = "🤖 **DASHBOARD JAGO**\n"
+    status_text += "━━━━━━━━━━━━━━\n"
+    status_text += f"🛡️ Mode: **{'SIMULASI' if DRY_RUN_MODE else 'WAR RIEL'}**\n\n"
+    
+    if not drafts:
+        status_text += "❌ **Belum ada akun terdaftar.**\n"
+        status_text += "Silakan tambah akun di menu 👥 **Kelola Akun**."
+    else:
+        status_text += "👥 **STATUS AKUN:**\n"
+        for i, (username, is_active, has_draft, total_maxi, _) in enumerate(drafts, 1):
+            session_ok = get_session_status(user_id, username)
+            s_icon = "🔑" if session_ok else "🚫"
+            d_icon = "✅" if has_draft else "📝"
+            active_mark = " 🟢" if username == current_user else ""
+            
+            status_text += f"{i}. `{username[:20]}...` {s_icon}{d_icon}{active_mark}\n"
+            status_text += f"   └─ Draf: {f'**{total_maxi} Box**' if has_draft else '_Kosong_'}\n"
+    
+    status_text += "\n💡 **Tips:** Klik 🚀 **SIAPKAN WAR** untuk login otomatis semua akun."
 
-    teks = (
-        f"🤖 **Bot JAGO**\n\n"
-        f"🟢 **Akun Aktif:** `{status_akun}`\n\n"
-        f"💡 Pertama kali pakai? Buka **📖 Tutorial & Panduan**."
-    )
-    await message.answer(teks, reply_markup=get_main_menu_keyboard(), parse_mode="Markdown")
+    if isinstance(event, Message):
+        await event.answer(status_text, reply_markup=get_main_menu_keyboard(), parse_mode="Markdown")
+    else:
+        await event.message.edit_text(status_text, reply_markup=get_main_menu_keyboard(), parse_mode="Markdown")
 
 # ============================================================
 # TUTORIAL MULTI-HALAMAN
@@ -530,30 +545,22 @@ async def cb_tutorial(callback: CallbackQuery):
 @router.callback_query(F.data == "menu_akun")
 async def cb_menu_akun(callback: CallbackQuery):
     accounts = get_all_accounts_with_status(str(callback.from_user.id))
-    current = get_current_user(str(callback.from_user.id))
     keyboard = []
 
     for acc, is_active, has_session in accounts:
-        # Bahasa sederhana: 🟢 = akun yg sedang dipilih, ✅ = siap, ⚠️ = perlu disiapkan
-        siap = "✅ Siap" if has_session else "⚠️ Perlu disiapkan"
-        aktif = " ← dipilih" if is_active else ""
-        label = f"🟢 {acc[:28]}{aktif}" if is_active else f"⚫ {acc[:28]}"
-        keyboard.append([InlineKeyboardButton(text=f"{label}  {siap}", callback_data=f"acc_detail:{acc}")])
+        s_icon = "🟢" if is_active else "⚫"
+        k_icon = "🔑" if has_session else "🚫"
+        keyboard.append([InlineKeyboardButton(text=f"{s_icon}{k_icon} {acc}", callback_data=f"acc_detail:{acc}")])
 
     keyboard.append([InlineKeyboardButton(text="➕ Tambah Akun", callback_data="add_new_acc")])
-    keyboard.append([InlineKeyboardButton(
-        text="✅ Siapkan Semua untuk War",
-        callback_data="siapkan_semua"
-    )])
     keyboard.append([InlineKeyboardButton(text="🔙 Kembali", callback_data="kembali_ke_menu")])
 
-    total = len(accounts)
     teks = (
-        f"👥 **Kelola Akun** ({total}/2)\n\n"
-        f"🟢 = Akun yang sedang dipilih untuk input pesanan\n"
-        f"✅ Siap = Akun sudah bisa digunakan saat war\n"
-        f"⚠️ Perlu disiapkan = Klik **Siapkan Semua untuk War**\n\n"
-        "Klik nama akun untuk melihat **detail & pengaturan**."
+        "👥 **KELOLA AKUN**\n"
+        "━━━━━━━━━━━━━━\n"
+        "🟢 = Akun Aktif | ⚫ = Tidak Aktif\n"
+        "🔑 = Sesi OK | 🚫 = Butuh Login\n\n"
+        "Klik nama akun untuk **Detail & Login**."
     )
     await callback.message.edit_text(
         teks, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard), parse_mode="Markdown"
@@ -730,73 +737,6 @@ async def process_password(message: Message, state: FSMContext):
 
 @router.callback_query(F.data == "menu_status")
 async def cb_menu_status(callback: CallbackQuery):
-    now = datetime.now(zona_waktu).strftime("%d %B %Y, %H:%M:%S WIB")
-    orders = get_all_pending_orders_multi(str(callback.from_user.id))
-    total_draf = len(orders)
-    status_order = f"{total_draf} PENDING ⏳" if total_draf > 0 else "KOSONG (Liburr 🏖️)"
-    
-    teks = (f"📊 **STATUS**\n\n🕒 **Waktu:** {now}\n\n🛒 **Total Draf (Semua Akun):** {status_order}\n")
-    btn = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Kembali", callback_data="kembali_ke_menu")]])
-    await callback.message.edit_text(teks, reply_markup=btn, parse_mode="Markdown")
-
-@router.callback_query(F.data == "menu_kelola")
-async def cb_menu_kelola(callback: CallbackQuery):
-    tid = str(callback.from_user.id)
-    overview = get_all_drafts_overview(tid)
-    current_user = get_current_user(tid)
-
-    teks = "📝 **SEMUA DRAF PESANAN**\n\n"
-    siap = 0
-    for username, is_active, has_draft, total_maxi, tgl_buat in overview:
-        aktif_mark = " ← aktif" if username == current_user else ""
-        if has_draft:
-            siap += 1
-            # Cek apakah draf ini lama (lebih dari 18 jam)
-            tgl_str = tgl_buat[:16] if tgl_buat else "?"
-            teks += f"✅ `{username[:28]}`{aktif_mark}\n"
-            teks += f"   📦 {total_maxi} MAXI · 🕒 {tgl_str}\n\n"
-        else:
-            teks += f"❌ `{username[:28]}`{aktif_mark}\n"
-            teks += f"   _(belum ada draf)_\n\n"
-
-    teks += f"**Siap perang: {siap}/{len(overview)} akun**"
-
-    keyboard = [
-        [InlineKeyboardButton(text="👁 Detail & Edit Draf Akun Aktif", callback_data="detail_draf_aktif")],
-        [InlineKeyboardButton(text="📜 Riwayat Semua Akun", callback_data="lihat_riwayat")],
-        [InlineKeyboardButton(text="🔙 Kembali", callback_data="kembali_ke_menu")],
-    ]
-    await callback.message.edit_text(
-        teks, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard), parse_mode="Markdown"
-    )
-
-@router.callback_query(F.data == "detail_draf_aktif")
-async def cb_detail_draf_aktif(callback: CallbackQuery):
-    tid = str(callback.from_user.id)
-    current_user = get_current_user(tid)
-    pending = get_pending_order(tid)
-
-    keyboard = []
-    if pending:
-        order_id, total_maxi, payload_json, tgl_buat = pending
-        keranjang = json.loads(payload_json)
-        teks_items = "\n".join([f"  · {i['qty']}x {i['nama']}" for i in keranjang])
-        tgl_str = tgl_buat[:16] if tgl_buat else "?"
-        teks = (
-            f"📦 **DRAF: {current_user}**\n"
-            f"🕒 Dibuat: {tgl_str}\n\n"
-            f"{teks_items}\n\n"
-            f"📊 Total MAXI: **{total_maxi} pcs**"
-        )
-        keyboard.append([InlineKeyboardButton(text="✏️ Edit Draf", callback_data="edit_order")])
-        keyboard.append([InlineKeyboardButton(text="🗑️ Hapus Draf", callback_data="hapus_order")])
-    else:
-        teks = f"⭕ Tidak ada draf untuk akun **{current_user}**."
-
-    keyboard.append([InlineKeyboardButton(text="🔙 Kembali", callback_data="menu_kelola")])
-    await callback.message.edit_text(
-        teks, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard), parse_mode="Markdown"
-    )
 
 @router.callback_query(F.data == "lihat_riwayat")
 async def cb_lihat_riwayat(callback: CallbackQuery):
@@ -826,46 +766,76 @@ async def cb_lihat_riwayat(callback: CallbackQuery):
     if not ada_riwayat:
         teks += "_(Belum ada riwayat order yang sukses)_"
 
-    btn = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Kembali", callback_data="menu_kelola")]])
+    btn = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Kembali", callback_data="kembali_ke_menu")]])
     await callback.message.edit_text(teks, reply_markup=btn, parse_mode="Markdown")
 
 @router.callback_query(F.data == "hapus_order")
 async def cb_hapus_order(callback: CallbackQuery):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Ya, Hapus", callback_data="confirm_hapus"), InlineKeyboardButton(text="❌ Batal", callback_data="menu_kelola")]
+        [InlineKeyboardButton(text="✅ Ya, Hapus", callback_data="confirm_hapus"), InlineKeyboardButton(text="❌ Batal", callback_data="menu_order")]
     ])
     await callback.message.edit_text("⚠️ **Yakin menghapus draf akun ini?**", reply_markup=keyboard, parse_mode="Markdown")
 
 @router.callback_query(F.data == "confirm_hapus")
 async def cb_confirm_hapus(callback: CallbackQuery):
     delete_pending_order(str(callback.from_user.id))
-    btn = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Kembali", callback_data="kembali_ke_menu")]])
+    btn = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Kembali", callback_data="menu_order")]])
     await callback.message.edit_text("🗑️ **Draft dihapus!**", reply_markup=btn, parse_mode="Markdown")
 
-@router.callback_query(F.data == "edit_order")
-async def cb_edit_order(callback: CallbackQuery, state: FSMContext):
-    """Edit draf — draf ASLI tidak dihapus sampai user submit input baru."""
-    pending = get_pending_order(str(callback.from_user.id))
-    if not pending:
-        await callback.answer("Draf tidak ditemukan.", show_alert=True)
-        return
-    _, _, payload_json, _ = pending
-    keranjang = json.loads(payload_json)
-
-    teks_template = "✏️ **Edit Pesanan** — salin & ubah lalu kirim:\n\n"
-    for item in keranjang:
-        teks_template += f"- {item['qty']}x {item['nama']}\n"
-
-    await callback.message.edit_text(teks_template, parse_mode="Markdown")
-    # Pakai state khusus editing — draf lama BELUM dihapus
-    await state.set_state(OrderState.editing_existing)
-
 @router.callback_query(F.data == "menu_order")
-async def cb_menu_order(callback: CallbackQuery, state: FSMContext):
+async def cb_menu_order(callback: CallbackQuery):
+    tid = str(callback.from_user.id)
+    overview = get_all_drafts_overview(tid)
+    current_user = get_current_user(tid)
+    
+    teks = (
+        "📦 **SUSUN PESANAN**\n"
+        "━━━━━━━━━━━━━━\n"
+        "Pilih akun untuk mengelola draf:\n"
+    )
+    
+    keyboard = []
+    for username, is_active, has_draft, total_maxi, _ in overview:
+        d_icon = "✅" if has_draft else "📝"
+        active_mark = " 🟢" if username == current_user else ""
+        label = f"{d_icon} {username[:20]}{active_mark}"
+        keyboard.append([InlineKeyboardButton(text=label, callback_data=f"order_acc:{username}")])
+    
+    keyboard.append([InlineKeyboardButton(text="🔙 Kembali", callback_data="kembali_ke_menu")])
+    await callback.message.edit_text(teks, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard), parse_mode="Markdown")
+
+@router.callback_query(F.data.startswith("order_acc:"))
+async def cb_order_acc(callback: CallbackQuery):
+    target = callback.data.split(":", 1)[1]
+    tid = str(callback.from_user.id)
+    current = get_current_user(tid)
+    
+    # Set as active first if not active
+    if target != current:
+        set_active_account(tid, target)
+    
+    pending = get_pending_order(tid)
+    
+    teks = f"📝 **Kelola Draf: `{target}`**\n━━━━━━━━━━━━━━\n"
+    if pending:
+        _, total_maxi, payload_json, tgl_buat = pending
+        keranjang = json.loads(payload_json)
+        items = "\n".join([f"· {i['qty']}x {i['nama']}" for i in keranjang[:5]])
+        if len(keranjang) > 5: items += "\n... (lebih banyak)"
+        teks += f"📦 Total: **{total_maxi} Box MAXI**\n🕒 Dibuat: {tgl_buat[:16]}\n\n📋 **Isi:**\n{items}"
+    else:
+        teks += "⚠️ **Draf Kosong!**\nSilakan input pesanan baru."
+
+    keyboard = [
+        [InlineKeyboardButton(text="📥 Input/Ganti Pesanan", callback_data="start_input_order")],
+        [InlineKeyboardButton(text="🗑️ Hapus Draf", callback_data="hapus_order")],
+        [InlineKeyboardButton(text="🔙 Kembali", callback_data="menu_order")]
+    ]
+    await callback.message.edit_text(teks, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard), parse_mode="Markdown")
+
+@router.callback_query(F.data == "start_input_order")
+async def cb_start_input_order(callback: CallbackQuery, state: FSMContext):
     current_user = get_current_user(str(callback.from_user.id))
-    if not current_user:
-        await callback.answer("Tambahkan akun terlebih dahulu!", show_alert=True)
-        return
 
     template = (
         f" **Order untuk Akun: {current_user}**\n\n"
