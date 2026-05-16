@@ -32,7 +32,6 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 BOT_TOKEN  = os.getenv("BOT_TOKEN")
 ADMIN_ID   = int(os.getenv("ADMIN_ID"))
-DRY_RUN_MODE = os.getenv("DRY_RUN", "false").lower() == "true"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -54,12 +53,12 @@ class OrderState(StatesGroup):
 
 mesin_siaga = {} 
 
-async def eksekusi_dengan_jeda(engine, delay, username, dry_run=False):
+async def eksekusi_dengan_jeda(engine, delay, username):
     if delay > 0:
         await asyncio.sleep(delay)
 
-    logger.info(f"{'[DRY RUN]' if dry_run else '[WAR]'} akun: {username} (Delay: {delay:.1f}s)")
-    hasil = await engine.execute_order(dry_run=dry_run)
+    logger.info(f"[WAR] akun: {username} (Delay: {delay:.1f}s)")
+    hasil = await engine.execute_order()
     return username, hasil, engine.step_log, getattr(engine, 'order_id_woo', 'UNKNOWN')
 
 async def job_pemanasan():
@@ -153,46 +152,26 @@ async def job_eksekusi():
         # Gunakan delay sangat kecil (jitter) agar semua akun hit hampir bersamaan tapi tetap teratur
         delay_total = 0.0
         for username, engine in pasukan.items():
-            tasks.append(eksekusi_dengan_jeda(engine, delay_total, username, dry_run=DRY_RUN_MODE))
+            tasks.append(eksekusi_dengan_jeda(engine, delay_total, username))
             delay_total += random.uniform(0.1, 0.3) 
 
         hasil_perang = await asyncio.gather(*tasks)
 
-        if DRY_RUN_MODE:
-            # ─── Laporan DRY RUN: detail tiap langkah ───────────────────────
-            laporan = (
-                f"🧪 **[DRY RUN] LAPORAN SIMULASI 08:00 WIB**\n"
-                f"_{len(pasukan)} akun diuji — checkout TIDAK dieksekusi_\n\n"
-            )
-            for target_username, is_success, step_log, order_id_woo in hasil_perang:
-                status_icon = "✅" if is_success else "❌"
-                laporan += f"{'─'*30}\n"
-                laporan += f"👤 `{target_username}` {status_icon}\n"
-                for baris in step_log:
-                    laporan += f"  {baris}\n"
-                laporan += "\n"
+        # ─── Laporan WAR biasa ───────────────────────────────────────────
+        laporan = "📊 **HASIL WAR 08:00 WIB:**\n\n"
+        for target_username, is_success, step_log, order_id_woo in hasil_perang:
+            status = "✅ BERHASIL" if is_success else "❌ GAGAL/HABIS"
+            if is_success and order_id_woo != "UNKNOWN":
+                status += f" (Order ID: `{order_id_woo}`)"
+            laporan += f"👤 `{target_username}`: {status}\n"
 
-            laporan += (
-                f"{'─'*30}\n"
-                f"💡 Jika semua langkah ✅, ganti `DRY_RUN=false` di `.env`\n"
-                f"   lalu restart bot untuk war sesungguhnya."
-            )
-        else:
-            # ─── Laporan WAR biasa ───────────────────────────────────────────
-            laporan = "📊 **HASIL WAR 08:00 WIB:**\n\n"
-            for target_username, is_success, step_log, order_id_woo in hasil_perang:
-                status = "✅ BERHASIL" if is_success else "❌ GAGAL/HABIS"
-                if is_success and order_id_woo != "UNKNOWN":
-                    status += f" (Order ID: `{order_id_woo}`)"
-                laporan += f"👤 `{target_username}`: {status}\n"
-
-                # Jika gagal, extract error reason dari step_log
-                if not is_success and step_log:
-                    error_lines = [line for line in step_log if any(icon in line for icon in ["❌", "⚠️"])]
-                    if error_lines:
-                        # Ambil yang paling recent (biasanya yang terakhir adalah root cause)
-                        error_reason = error_lines[-1][:80]  # Max 80 char
-                        laporan += f"   └─ {error_reason}\n"
+            # Jika gagal, extract error reason dari step_log
+            if not is_success and step_log:
+                error_lines = [line for line in step_log if any(icon in line for icon in ["❌", "⚠️"])]
+                if error_lines:
+                    # Ambil yang paling recent (biasanya yang terakhir adalah root cause)
+                    error_reason = error_lines[-1][:80]  # Max 80 char
+                    laporan += f"   └─ {error_reason}\n"
 
         for target_username, is_success, step_log, order_id_woo in hasil_perang:
             engine = pasukan.get(target_username)
@@ -201,7 +180,7 @@ async def job_eksekusi():
 
         mesin_siaga.pop(ADMIN_ID, None)
         await bot.send_message(ADMIN_ID, laporan, parse_mode="Markdown")
-        logger.info("War/DryRun Selesai.")
+        logger.info("War Selesai.")
 
     except CloudflareBlockException as e:
         pesan_error = "🚨 **[CLOUDFLARE BLOCK]** Bot terdeteksi oleh Cloudflare dan tidak dapat memproses request! Mohon periksa IP atau jaringan."
@@ -218,7 +197,7 @@ async def job_eksekusi():
         mesin_siaga.pop(ADMIN_ID, None)
     except Exception as e:
         pesan_error = (
-            f"🚨 **[FATAL ERROR] {'DRY RUN' if DRY_RUN_MODE else 'WAR'} CRASH!**\n\n"
+            f"🚨 **[FATAL ERROR] WAR CRASH!**\n\n"
             f"Bot mengalami error kritis saat eksekusi jam 08:00:\n"
             f"`{type(e).__name__}: {str(e)[:300]}`\n\n"
             f"Cek file `siliwangi_error.log` untuk detail lengkap."
@@ -363,7 +342,7 @@ async def cmd_start(event, state: FSMContext = None):
     
     status_text = "🤖 **DASHBOARD JAGO**\n"
     status_text += "━━━━━━━━━━━━━━\n"
-    status_text += f"🛡️ Mode: **{'SIMULASI' if DRY_RUN_MODE else 'WAR RIEL'}**\n\n"
+    status_text += f"🛡️ Mode: **WAR RIEL (PRODUKSI)**\n\n"
     
     if not drafts:
         status_text += "❌ **Belum ada akun terdaftar.**\n"

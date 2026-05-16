@@ -126,14 +126,15 @@ def init_db():
             total_maxi INTEGER,
             payload_json TEXT,
             order_id TEXT,
+            status TEXT DEFAULT 'SUKSES',
             tanggal TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    # Jalankan migrasi jika tabel sudah ada tapi kolom belum lengkap
     add_column_if_missing("users", "is_active", "INTEGER DEFAULT 0")
     add_column_if_missing("draft_orders", "total_maxi", "INTEGER")
     add_column_if_missing("draft_orders", "created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
     add_column_if_missing("order_history", "order_id", "TEXT")
+    add_column_if_missing("order_history", "status", "TEXT DEFAULT 'SUKSES'")
 
     # Tabel engine_ready_status
     cursor.execute('''
@@ -500,14 +501,37 @@ def get_order_history(telegram_id, username):
     conn = sqlite3.connect(DB_NAME, timeout=10)
     cursor = conn.cursor()
     cursor.execute('''
-        SELECT datetime(tanggal, 'localtime'), total_maxi, payload_json
+        SELECT datetime(tanggal, 'localtime'), total_maxi, payload_json, status
         FROM order_history
         WHERE telegram_id=? AND username=?
-        ORDER BY id DESC LIMIT 3
+        ORDER BY id DESC LIMIT 20
     ''', (telegram_id, username))
     rows = cursor.fetchall()
     conn.close()
     return rows
+
+def add_order_history(telegram_id, username, total_maxi, payload_json, order_id, status='SUKSES'):
+    """Menambahkan riwayat order dan otomatis memangkas agar maksimal 20 per akun."""
+    conn = sqlite3.connect(DB_NAME, timeout=10)
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO order_history (telegram_id, username, total_maxi, payload_json, order_id, status)
+        VALUES (?, ?, ?, ?, ?, ?)
+    ''', (telegram_id, username, total_maxi, payload_json, order_id, status))
+    
+    # Trim to max 20 records per account
+    cursor.execute('''
+        DELETE FROM order_history 
+        WHERE id NOT IN (
+            SELECT id FROM order_history 
+            WHERE telegram_id = ? AND username = ? 
+            ORDER BY id DESC LIMIT 20
+        )
+        AND telegram_id = ? AND username = ?
+    ''', (telegram_id, username, telegram_id, username))
+    
+    conn.commit()
+    conn.close()
 
 
 if __name__ == "__main__":
