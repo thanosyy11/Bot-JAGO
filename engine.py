@@ -437,7 +437,7 @@ class SiliwangiEngine:
             if not res_get:
                 return False, 0
 
-            if any(kw in res_get.text.lower() for kw in ["tidak dapat menambahkan", "out of stock", "out of stok", "disabled="]):
+            if any(kw in res_get.text.lower() for kw in ["tidak dapat menambahkan", "out of stock", "out of stok"]):
                 return False, 0
 
             return True, qty
