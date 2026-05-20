@@ -562,19 +562,33 @@ class SiliwangiEngine:
 
     async def get_checkout_nonce(self):
         """
-        Mengambil dua nonce dari halaman checkout:
-        1. woocommerce-process-checkout-nonce  → untuk POST ?wc-ajax=checkout
-        2. security nonce                       → untuk POST ?wc-ajax=update_order_review
+        Mengambil dua nonce dari halaman checkout.
+        Dicoba 2x jika redirect terjadi (session mungkin baru saja di-refresh).
         """
         try:
-            res = await self._safe_request('GET', "https://siliwangibolukukus.com/checkout/", follow_redirects=False)
+            # Coba pertama: tanpa follow redirect agar bisa deteksi redirect
+            res = await self._safe_request('GET', "https://siliwangibolukukus.com/checkout/",
+                                           follow_redirects=False)
             if not res:
                 return False
 
+            # Jika redirect (cart kosong / session masalah), coba re-login + retry 1x
             if res.status_code in [301, 302]:
                 loc = res.headers.get("Location", "")
-                logger.error(f"❌ [{self.username}] Cart kosong atau session expired, redirect ke {loc}")
-                return False
+                logger.warning(f"⚠️ [{self.username}] Checkout redirect ke {loc} — coba re-login...")
+                # Re-login sekali
+                clear_session_cookies(self.telegram_id, self.username)
+                if not await self.login():
+                    logger.error(f"❌ [{self.username}] Re-login sebelum nonce GAGAL")
+                    return False
+                # Retry ambil checkout page setelah re-login
+                res = await self._safe_request('GET', "https://siliwangibolukukus.com/checkout/",
+                                               follow_redirects=True)
+                if not res:
+                    return False
+                if "checkout" not in str(res.url):
+                    logger.error(f"❌ [{self.username}] Setelah re-login masih terpental: {res.url}")
+                    return False
 
             soup = BeautifulSoup(res.text, 'html.parser')
 
@@ -584,10 +598,10 @@ class SiliwangiEngine:
                 self.checkout_nonce = nonce_field.get('value')
             else:
                 logger.error(f"Gagal mendapatkan checkout nonce [{self.username}]")
+                self._simpan_snapshot_html(res.text, "NoNonce_Checkout")
                 return False
 
             # Nonce 2: security nonce untuk update_order_review
-            # WooCommerce menyimpannya di inline JS: "update_order_review_nonce":"xxxxx"
             self.security_nonce = self._extract_security_nonce(res.text)
             if self.security_nonce:
                 logger.info(f"🔐 [{self.username}] Security nonce OK: {self.security_nonce[:8]}...")
@@ -879,7 +893,15 @@ class SiliwangiEngine:
 
             logger.info(f"💳 [{self.username}] Mencoba checkout via CHEQUE...")
             ajax_headers = {"X-Requested-With": "XMLHttpRequest", "Accept": "application/json"}
-            final_res = await self._safe_request_with_recovery('POST', checkout_url, headers=ajax_headers, data=base_payload)
+            # Timeout lebih panjang untuk POST checkout (server bisa lambat saat war)
+            try:
+                final_res = await asyncio.wait_for(
+                    self._safe_request_with_recovery('POST', checkout_url, headers=ajax_headers, data=base_payload),
+                    timeout=30.0
+                )
+            except asyncio.TimeoutError:
+                logger.error(f"⏰ [{self.username}] Checkout POST timeout (30s)! Server tidak merespons.")
+                return False
             if not final_res:
                 logger.error(f"💀 [{self.username}] Tidak ada respons dari server checkout.")
                 return False
@@ -935,30 +957,39 @@ class SiliwangiEngine:
 
     def _mark_success(self):
         """
-        ✅ Perbaikan: Draft benar-benar DIHAPUS dari draft_orders setelah sukses,
-        bukan hanya diubah statusnya. Data sukses disimpan ke order_history.
+        Atomik: INSERT ke order_history + DELETE dari draft_orders dalam 1 transaksi.
+        Jika salah satu gagal, keduanya di-rollback agar data konsisten.
         """
         conn = sqlite3.connect(DB_NAME, timeout=10)
         cursor = conn.cursor()
+        try:
+            # Ambil data draft
+            cursor.execute(
+                "SELECT telegram_id, username, total_maxi, payload_json FROM draft_orders WHERE id=?",
+                (self.order_id,)
+            )
+            row = cursor.fetchone()
+            if row:
+                # INSERT ke riwayat
+                cursor.execute('''
+                    INSERT INTO order_history (telegram_id, username, total_maxi, payload_json, order_id)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (row[0], row[1], row[2], row[3], getattr(self, 'order_id_woo', 'UNKNOWN')))
+                logger.info(f"📚 [{self.username}] Riwayat order tersimpan.")
+            else:
+                logger.warning(f"⚠️ [{self.username}] Draft ID {self.order_id} tidak ditemukan saat _mark_success!")
 
-        # Simpan ke order_history terlebih dahulu
-        cursor.execute(
-            "SELECT telegram_id, username, total_maxi, payload_json FROM draft_orders WHERE id=?",
-            (self.order_id,)
-        )
-        row = cursor.fetchone()
-        if row:
-            cursor.execute('''
-                INSERT INTO order_history (telegram_id, username, total_maxi, payload_json, order_id)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (row[0], row[1], row[2], row[3], getattr(self, 'order_id_woo', 'UNKNOWN')))
+            # DELETE draft (tetap hapus meski row tidak ditemukan, untuk keamanan)
+            cursor.execute("DELETE FROM draft_orders WHERE id=?", (self.order_id,))
 
-        # Hapus draft dari draft_orders (bukan hanya update status)
-        cursor.execute("DELETE FROM draft_orders WHERE id=?", (self.order_id,))
-
-        conn.commit()
-        conn.close()
-        logger.info(f"✅ [{self.username}] Draft dihapus, riwayat tersimpan.")
+            conn.commit()  # ← Satu commit untuk INSERT + DELETE
+            logger.info(f"✅ [{self.username}] Draft dihapus, riwayat tersimpan.")
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"❌ [{self.username}] _mark_success GAGAL, rollback: {e}", exc_info=True)
+            raise  # Re-raise agar caller tahu
+        finally:
+            conn.close()
 
     # ------------------------------------------------------------------
     # CLOSE HTTP CLIENT

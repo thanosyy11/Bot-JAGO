@@ -109,7 +109,7 @@ async def job_pemanasan():
 
     # Eksekusi login secara PARALEL untuk kecepatan
     tasks = [_login_task(order[1]) for order in orders]
-    await asyncio.gather(*tasks)
+    await asyncio.gather(*tasks, return_exceptions=True)
 
     if berhasil_login > 0:
         status_txt = f"✅ Login berhasil: **{berhasil_login}/{len(orders)} akun**"
@@ -177,7 +177,15 @@ async def job_eksekusi():
                 await engine.close()
 
         mesin_siaga.pop(ADMIN_ID, None)
-        await bot.send_message(ADMIN_ID, laporan, parse_mode="Markdown")
+        try:
+            await bot.send_message(ADMIN_ID, laporan, parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"Gagal kirim laporan WAR ke Telegram: {e}")
+            # Coba kirim versi plain text sebagai fallback
+            try:
+                await bot.send_message(ADMIN_ID, laporan.replace('`', '').replace('*', '').replace('_', ''))
+            except Exception:
+                pass
         logger.info("War Selesai.")
 
     except CloudflareBlockException as e:
@@ -338,9 +346,7 @@ async def cmd_start(event, state: FSMContext = None):
     drafts = get_all_drafts_overview(user_id)
     current_user = get_current_user(user_id)
     
-    status_text = "🤖 **DASHBOARD JAGO**\n"
-    status_text += "━━━━━━━━━━━━━━\n"
-    status_text += f"🛡️ Mode: **PRODUKSI**\n\n"
+    status_text = "🤖 **welcome Bpot JAGO**\n"
     
     if not drafts:
         status_text += "❌ **Belum ada akun terdaftar.**\n"
