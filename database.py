@@ -499,12 +499,25 @@ def get_all_products_dict():
 def get_order_history(telegram_id, username):
     conn = sqlite3.connect(DB_NAME, timeout=10)
     cursor = conn.cursor()
-    cursor.execute('''
-        SELECT datetime(tanggal, 'localtime'), total_maxi, payload_json
-        FROM order_history
-        WHERE telegram_id=? AND username=?
-        ORDER BY id DESC LIMIT 3
-    ''', (telegram_id, username))
+    # Cek apakah kolom 'status' sudah ada di order_history
+    cursor.execute("PRAGMA table_info(order_history)")
+    cols = {row[1] for row in cursor.fetchall()}
+    if 'status' in cols:
+        cursor.execute('''
+            SELECT datetime(tanggal, 'localtime'), total_maxi, payload_json,
+                   COALESCE(status, 'SUKSES') as status
+            FROM order_history
+            WHERE telegram_id=? AND username=?
+            ORDER BY id DESC LIMIT 20
+        ''', (telegram_id, username))
+    else:
+        cursor.execute('''
+            SELECT datetime(tanggal, 'localtime'), total_maxi, payload_json,
+                   'SUKSES' as status
+            FROM order_history
+            WHERE telegram_id=? AND username=?
+            ORDER BY id DESC LIMIT 20
+        ''', (telegram_id, username))
     rows = cursor.fetchall()
     conn.close()
     return rows
