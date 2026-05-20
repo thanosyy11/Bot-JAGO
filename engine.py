@@ -252,64 +252,48 @@ class SiliwangiEngine:
             return False
 
         url_account = "https://siliwangibolukukus.com/my-account/"
-        max_retries = 5
-        
-        for attempt in range(1, max_retries + 1):
-            try:
-                # Cek sesi langsung dari cookies di memori (Sangat Cepat)
-                has_wp_cookie = any(
-                    'wordpress_logged_in' in cookie.name 
-                    for cookie in self.client.cookies.jar
-                )
-                
-                if has_wp_cookie:
-                    logger.info(f"✅ [{self.username}] Sesi valid di memori (cookie found).")
-                    return True
+        try:
+            response = await self._safe_request('GET', url_account)
+            if not response:
+                return False
 
-                response = await self._safe_request('GET', url_account)
-                if not response:
-                    continue
+            # Cek apakah sesi masih aktif (via cookies tersimpan)
+            if "Keluar" in response.text or "Logout" in response.text or "Pesanan" in response.text:
+                logger.info(f"✅ [{self.username}] Sesi masih aktif (cookies).")
+                self._save_cookies()
+                return True
 
-                if any('wordpress_logged_in' in cookie.name for cookie in self.client.cookies.jar):
-                    logger.info(f"✅ [{self.username}] Sesi aktif setelah cek GET (cookie).")
-                    self._save_cookies()
-                    return True
+            # Session expired → clear lama, fresh login
+            logger.info(f"🔐 [{self.username}] Session expired, login ulang...")
+            clear_session_cookies(self.telegram_id, self.username)
 
-                logger.info(f"🔐 [{self.username}] Session expired/belum ada, mencoba login (percobaan ke-{attempt})...")
-                clear_session_cookies(self.telegram_id, self.username)
+            soup = BeautifulSoup(response.text, 'html.parser')
+            nonce_field = soup.find('input', {'name': 'woocommerce-login-nonce'})
+            if not nonce_field:
+                logger.error(f"Gagal mendapatkan Login Nonce untuk: {self.username}")
+                return False
 
-                soup = BeautifulSoup(response.text, 'html.parser')
-                nonce_field = soup.find('input', {'name': 'woocommerce-login-nonce'})
-                if not nonce_field:
-                    logger.error(f"Gagal mendapatkan Login Nonce untuk: {self.username}")
-                    await asyncio.sleep(2)
-                    continue
+            payload = {
+                "username": self.username,
+                "password": self.password,
+                "woocommerce-login-nonce": nonce_field.get('value'),
+                "_wp_http_referer": "/my-account/",
+                "login": "Masuk"
+            }
+            login_res = await self._safe_request('POST', url_account, data=payload)
+            if login_res and ("Keluar" in login_res.text or "Logout" in login_res.text):
+                logger.info(f"✅ Login sukses (fresh): {self.username}")
+                self._save_cookies()
+                return True
+            else:
+                logger.warning(f"❌ Login gagal: {self.username}")
+                if login_res:
+                    self._simpan_snapshot_html(login_res.text, "Login_Gagal")
+                return False
 
-                payload = {
-                    "username": self.username,
-                    "password": self.password,
-                    "woocommerce-login-nonce": nonce_field.get('value'),
-                    "_wp_http_referer": "/my-account/",
-                    "login": "Masuk"
-                }
-                login_res = await self._safe_request('POST', url_account, data=payload)
-                
-                # Validasi kesuksesan mutlak melalui Cookies (bukan elemen teks/HTML)
-                if any('wordpress_logged_in' in cookie.name for cookie in self.client.cookies.jar):
-                    logger.info(f"✅ Login sukses (fresh): {self.username}")
-                    self._save_cookies()
-                    return True
-                else:
-                    logger.warning(f"❌ Login gagal: {self.username} (Percobaan {attempt}/{max_retries})")
-                    if login_res and attempt == max_retries:
-                        self._simpan_snapshot_html(login_res.text, "Login_Gagal")
-                    await asyncio.sleep(2)
-
-            except Exception as e:
-                logger.error(f"Error saat login {self.username} (Percobaan {attempt}): {e}", exc_info=True)
-                await asyncio.sleep(2)
-                
-        return False
+        except Exception as e:
+            logger.error(f"Error saat login {self.username}: {e}", exc_info=True)
+            return False
 
 
     # ------------------------------------------------------------------
@@ -437,7 +421,7 @@ class SiliwangiEngine:
             if not res_get:
                 return False, 0
 
-            if any(kw in res_get.text.lower() for kw in ["tidak dapat menambahkan", "out of stock", "out of stok"]):
+            if any(kw in res_get.text.lower() for kw in ["tidak dapat menambahkan", "out of stock", "habis"]):
                 return False, 0
 
             return True, qty
@@ -469,8 +453,8 @@ class SiliwangiEngine:
         cursor.execute('''
             SELECT id, nama, tier FROM products
             WHERE kategori=? AND tier>0 AND id!=?
-            ORDER BY tier ASC, id ASC
-        ''', (kategori, target_id))
+            ORDER BY ABS(tier - ?) ASC
+        ''', (kategori, target_id, target_tier))
         alternatives = cursor.fetchall()
         conn.close()
 
@@ -730,9 +714,9 @@ class SiliwangiEngine:
     # ------------------------------------------------------------------
 
     async def execute_order(self):
-        """Eksekusi order lengkap."""
-        self.step_log = []  # Reset log setiap eksekusi
-        self.reconnect_attempt = 0  # Reset reconnect counter untuk order baru
+        """Eksekusi order produksi penuh."""
+        self.step_log = []
+        self.reconnect_attempt = 0
         self._step("🔑", "Memulai", "WAR")
 
         logger.info(f"🔑 [{self.username}] Mengamankan sesi login...")
@@ -890,8 +874,6 @@ class SiliwangiEngine:
                 "Berhasil" if self.security_nonce else "Dilewati (nonce tidak ada)"
             )
 
-
-
             # 5) POST checkout final — hanya metode 'cheque' (sesuai record)
             checkout_url = "https://siliwangibolukukus.com/?wc-ajax=checkout"
 
@@ -941,19 +923,25 @@ class SiliwangiEngine:
 
             logger.error(f"💀 [{self.username}] Checkout GAGAL. Response: {final_res.text[:200]}")
             self._simpan_snapshot_html(final_res.text, "Checkout_GAGAL")
-            self._mark_failed()
             return False
 
         except Exception as e:
             logger.error(f"Fatal error checkout [{self.username}]: {e}", exc_info=True)
-            self._mark_failed()
             return False
 
     # ------------------------------------------------------------------
-    # MARK SUCCESS & FAILED — hapus draft, simpan ke history
+    # MARK SUCCESS — hapus draft, simpan ke history
     # ------------------------------------------------------------------
 
-    def _save_history_and_trim(self, cursor, status):
+    def _mark_success(self):
+        """
+        ✅ Perbaikan: Draft benar-benar DIHAPUS dari draft_orders setelah sukses,
+        bukan hanya diubah statusnya. Data sukses disimpan ke order_history.
+        """
+        conn = sqlite3.connect(DB_NAME, timeout=10)
+        cursor = conn.cursor()
+
+        # Simpan ke order_history terlebih dahulu
         cursor.execute(
             "SELECT telegram_id, username, total_maxi, payload_json FROM draft_orders WHERE id=?",
             (self.order_id,)
@@ -961,36 +949,16 @@ class SiliwangiEngine:
         row = cursor.fetchone()
         if row:
             cursor.execute('''
-                INSERT INTO order_history (telegram_id, username, total_maxi, payload_json, order_id, status)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ''', (row[0], row[1], row[2], row[3], getattr(self, 'order_id_woo', 'UNKNOWN'), status))
-            
-            cursor.execute('''
-                DELETE FROM order_history 
-                WHERE id NOT IN (
-                    SELECT id FROM order_history 
-                    WHERE telegram_id = ? AND username = ? 
-                    ORDER BY id DESC LIMIT 20
-                )
-                AND telegram_id = ? AND username = ?
-            ''', (row[0], row[1], row[0], row[1]))
+                INSERT INTO order_history (telegram_id, username, total_maxi, payload_json, order_id)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (row[0], row[1], row[2], row[3], getattr(self, 'order_id_woo', 'UNKNOWN')))
 
-    def _mark_success(self):
-        conn = sqlite3.connect(DB_NAME, timeout=10)
-        cursor = conn.cursor()
-        self._save_history_and_trim(cursor, "SUKSES")
+        # Hapus draft dari draft_orders (bukan hanya update status)
         cursor.execute("DELETE FROM draft_orders WHERE id=?", (self.order_id,))
-        conn.commit()
-        conn.close()
-        logger.info(f"✅ [{self.username}] Draft dihapus, riwayat tersimpan (SUKSES).")
 
-    def _mark_failed(self):
-        conn = sqlite3.connect(DB_NAME, timeout=10)
-        cursor = conn.cursor()
-        self._save_history_and_trim(cursor, "GAGAL")
         conn.commit()
         conn.close()
-        logger.info(f"💀 [{self.username}] Riwayat tersimpan (GAGAL). Draft tidak dihapus.")
+        logger.info(f"✅ [{self.username}] Draft dihapus, riwayat tersimpan.")
 
     # ------------------------------------------------------------------
     # CLOSE HTTP CLIENT

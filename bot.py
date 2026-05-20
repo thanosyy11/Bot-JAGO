@@ -32,6 +32,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 BOT_TOKEN  = os.getenv("BOT_TOKEN")
 ADMIN_ID   = int(os.getenv("ADMIN_ID"))
+# Production mode only — dry run dihapus
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -149,15 +150,14 @@ async def job_eksekusi():
 
     try:
         tasks = []
-        # Gunakan delay sangat kecil (jitter) agar semua akun hit hampir bersamaan tapi tetap teratur
         delay_total = 0.0
         for username, engine in pasukan.items():
             tasks.append(eksekusi_dengan_jeda(engine, delay_total, username))
-            delay_total += random.uniform(0.1, 0.3) 
+            delay_total += random.uniform(0.1, 0.3)
 
         hasil_perang = await asyncio.gather(*tasks)
 
-        # ─── Laporan WAR biasa ───────────────────────────────────────────
+        # ─── Laporan WAR ───────────────────────────────────────────
         laporan = "📊 **HASIL WAR 08:00 WIB:**\n\n"
         for target_username, is_success, step_log, order_id_woo in hasil_perang:
             status = "✅ BERHASIL" if is_success else "❌ GAGAL/HABIS"
@@ -165,12 +165,10 @@ async def job_eksekusi():
                 status += f" (Order ID: `{order_id_woo}`)"
             laporan += f"👤 `{target_username}`: {status}\n"
 
-            # Jika gagal, extract error reason dari step_log
             if not is_success and step_log:
                 error_lines = [line for line in step_log if any(icon in line for icon in ["❌", "⚠️"])]
                 if error_lines:
-                    # Ambil yang paling recent (biasanya yang terakhir adalah root cause)
-                    error_reason = error_lines[-1][:80]  # Max 80 char
+                    error_reason = error_lines[-1][:80]
                     laporan += f"   └─ {error_reason}\n"
 
         for target_username, is_success, step_log, order_id_woo in hasil_perang:
@@ -342,7 +340,7 @@ async def cmd_start(event, state: FSMContext = None):
     
     status_text = "🤖 **DASHBOARD JAGO**\n"
     status_text += "━━━━━━━━━━━━━━\n"
-    status_text += f"🛡️ Mode: **WAR RIEL (PRODUKSI)**\n\n"
+    status_text += f"🛡️ Mode: **PRODUKSI**\n\n"
     
     if not drafts:
         status_text += "❌ **Belum ada akun terdaftar.**\n"
@@ -523,24 +521,41 @@ async def cb_tutorial(callback: CallbackQuery):
 
 @router.callback_query(F.data == "menu_akun")
 async def cb_menu_akun(callback: CallbackQuery):
-    accounts = get_all_accounts_with_status(str(callback.from_user.id))
+    tid = str(callback.from_user.id)
+    accounts = get_all_accounts_with_status(tid)
+    current = get_current_user(tid)
     keyboard = []
 
-    for acc, is_active, has_session in accounts:
-        s_icon = "🟢" if is_active else "⚫"
-        k_icon = "🔑" if has_session else "🚫"
-        keyboard.append([InlineKeyboardButton(text=f"{s_icon}{k_icon} {acc}", callback_data=f"acc_detail:{acc}")])
+    if not accounts:
+        teks = (
+            "👥 **KELOLA AKUN**\n"
+            "━━━━━━━━━━━━━━\n"
+            "❌ Belum ada akun terdaftar.\n\n"
+            "Klik **➕ Tambah Akun** untuk mulai."
+        )
+    else:
+        teks = (
+            "👥 **KELOLA AKUN**\n"
+            "━━━━━━━━━━━━━━\n"
+            "🟢 Aktif dipilih | ⚫ Tidak dipilih\n"
+            "🔑 Sesi tersimpan | 🚫 Perlu login\n"
+            "✅ Ada draf pesanan | 📝 Belum ada draf\n\n"
+        )
+        drafts_overview = get_all_drafts_overview(tid)
+        draft_map = {d[0]: d for d in drafts_overview}
+        for acc, is_active, has_session in accounts:
+            aktif_icon  = "🟢" if acc == current else "⚫"
+            sesi_icon   = "🔑" if has_session else "🚫"
+            draft_info  = draft_map.get(acc)
+            draf_icon   = "✅" if draft_info and draft_info[2] else "📝"
+            total_maxi  = draft_info[3] if draft_info and draft_info[2] else 0
+            label = f"{aktif_icon}{sesi_icon}{draf_icon} {acc[:22]}"
+            if total_maxi > 0:
+                label += f" [{total_maxi}box]"
+            keyboard.append([InlineKeyboardButton(text=label, callback_data=f"acc_detail:{acc}")])
 
     keyboard.append([InlineKeyboardButton(text="➕ Tambah Akun", callback_data="add_new_acc")])
     keyboard.append([InlineKeyboardButton(text="🔙 Kembali", callback_data="kembali_ke_menu")])
-
-    teks = (
-        "👥 **KELOLA AKUN**\n"
-        "━━━━━━━━━━━━━━\n"
-        "🟢 = Akun Aktif | ⚫ = Tidak Aktif\n"
-        "🔑 = Sesi OK | 🚫 = Butuh Login\n\n"
-        "Klik nama akun untuk **Detail & Login**."
-    )
     await callback.message.edit_text(
         teks, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard), parse_mode="Markdown"
     )
@@ -725,33 +740,55 @@ async def process_password(message: Message, state: FSMContext):
 
 @router.callback_query(F.data == "lihat_riwayat")
 async def cb_lihat_riwayat(callback: CallbackQuery):
-    """Riwayat semua akun, bukan hanya akun aktif."""
+    """Riwayat semua akun — menampilkan 20 order terakhir per akun."""
+    await callback.answer()
     tid = str(callback.from_user.id)
     accounts = get_all_accounts(tid)
     if not accounts:
-        await callback.answer("Belum ada akun.", show_alert=True)
+        await callback.message.edit_text(
+            "⚠️ **Belum ada akun terdaftar.**",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Kembali", callback_data="kembali_ke_menu")]
+            ]),
+            parse_mode="Markdown"
+        )
         return
 
-    teks = "📜 **RIWAYAT ORDER (Semua Akun)**\n\n"
+    teks = "📜 **RIWAYAT ORDER**\n━━━━━━━━━━━━━━\n\n"
     ada_riwayat = False
+
     for acc, _ in accounts:
         rows = get_order_history(tid, acc)
         if not rows:
+            teks += f"👤 `{acc[:30]}`\n"
+            teks += "   _Belum ada riwayat._\n\n"
             continue
         ada_riwayat = True
         teks += f"👤 `{acc[:30]}`\n"
-        for tgl, total, payload in rows:
-            keranjang = json.loads(payload)
-            preview = ", ".join([f"{i['qty']}x {i['nama']}" for i in keranjang[:2]])
-            if len(keranjang) > 2:
-                preview += "..."
-            teks += f"  🗓 {tgl[:16]} · {total} pcs\n  {preview}\n"
+        for row in rows:
+            # row = (tgl, total_maxi, payload_json, status) — 4 kolom
+            tgl    = row[0]
+            total  = row[1]
+            payload = row[2]
+            status = row[3] if len(row) > 3 else "SUKSES"
+            status_icon = "✅" if status == "SUKSES" else "❌"
+            try:
+                keranjang = json.loads(payload)
+                preview = ", ".join([f"{i['qty']}x {i['nama']}" for i in keranjang[:2]])
+                if len(keranjang) > 2:
+                    preview += f" +{len(keranjang)-2} item"
+            except Exception:
+                preview = "_data tidak terbaca_"
+            teks += f"  {status_icon} {tgl[:16]} — **{total} Box**\n"
+            teks += f"     └─ {preview}\n"
         teks += "\n"
 
     if not ada_riwayat:
-        teks += "_(Belum ada riwayat order yang sukses)_"
+        teks += "_(Semua akun belum memiliki riwayat order yang tersimpan.)_"
 
-    btn = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Kembali", callback_data="kembali_ke_menu")]])
+    btn = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 Kembali ke Menu", callback_data="kembali_ke_menu")]
+    ])
     await callback.message.edit_text(teks, reply_markup=btn, parse_mode="Markdown")
 
 @router.callback_query(F.data == "hapus_order")
