@@ -346,7 +346,9 @@ async def cmd_start(event, state: FSMContext = None):
     drafts = get_all_drafts_overview(user_id)
     current_user = get_current_user(user_id)
     
-    status_text = "🤖 **welcome Bpot JAGO**\n"
+    status_text = (
+        "🤖 **WELCOME TO BOT JAGO**\n"
+    )
     
     if not drafts:
         status_text += "❌ **Belum ada akun terdaftar.**\n"
@@ -358,8 +360,7 @@ async def cmd_start(event, state: FSMContext = None):
             s_icon = "🔑" if session_ok else "🚫"
             d_icon = "✅" if has_draft else "📝"
             active_mark = " 🟢" if username == current_user else ""
-            
-            status_text += f"{i}. `{username[:20]}...` {s_icon}{d_icon}{active_mark}\n"
+            status_text += f"{i}. `{username[:25]}` {s_icon}{d_icon}{active_mark}\n"
             status_text += f"   └─ Draf: {f'**{total_maxi} Box**' if has_draft else '_Kosong_'}\n"
     
     status_text += "\n💡 **Tips:** Klik 🚀 **SIAPKAN WAR** untuk login otomatis semua akun."
@@ -638,7 +639,11 @@ async def cb_add_new_acc(callback: CallbackQuery, state: FSMContext):
         return
     await callback.message.edit_text(
         f"➕ **Tambah Akun** ({total}/2)\n\n"
-        f"Ketik **Username atau Email** akun WooCommerce:",
+        f"Ketik **Username atau Email** akun WooCommerce:\n\n"
+        f"_Ketik /batal untuk membatalkan._",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Batal", callback_data="menu_akun")]
+        ]),
         parse_mode="Markdown"
     )
     await state.set_state(AkunState.waiting_for_username)
@@ -866,7 +871,7 @@ async def cb_start_input_order(callback: CallbackQuery, state: FSMContext):
     current_user = get_current_user(str(callback.from_user.id))
 
     template = (
-        f" **Order untuk Akun: {current_user}**\n\n"
+        f"📥 **Order untuk Akun: `{current_user}`**\n\n"
         "Salin dan edit kuantitas & nama semau kamu:\n\n"
         "- 50x MAXI Belgian Chocolate\n"
         "- 50x MAXI Black Forest\n"
@@ -886,9 +891,16 @@ async def cb_start_input_order(callback: CallbackQuery, state: FSMContext):
         "- 0x DC Black Forest\n"
         "- 50x Plastik Bolu Klasik HD Isi 3 Box\n"
         "- 0x Plastik Bakpia Kukus HD Isi 3 Box\n\n"
-        "*(Catatan: Hapus baris yang tidak perlu, atau cukup jadikan 0x)*"
+        "_Salin teks di atas, edit angka, lalu kirim._\n"
+        "_Ketik /batal untuk membatalkan._"
     )
-    await callback.message.edit_text(template, parse_mode="Markdown")
+    await callback.message.edit_text(
+        template,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Batal", callback_data="menu_order")]
+        ]),
+        parse_mode="Markdown"
+    )
     await state.set_state(OrderState.waiting_for_template)
     await callback.answer()
 
@@ -1006,7 +1018,8 @@ async def _proses_input_order(message: Message, state: FSMContext, is_edit: bool
     )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Simpan", callback_data="confirm_simpan_order"),
-         InlineKeyboardButton(text="✏️ Input Ulang", callback_data="kembali_ke_menu")]
+         InlineKeyboardButton(text="✏️ Input Ulang", callback_data="start_input_order")],
+        [InlineKeyboardButton(text="🔙 Batal", callback_data="menu_order")]
     ])
     await message.answer(teks_konfirm, reply_markup=keyboard, parse_mode="Markdown")
     await state.set_state(OrderState.confirming_order)
