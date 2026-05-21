@@ -95,10 +95,11 @@ class SiliwangiEngine:
     async def _safe_request(self, method, url, max_retries=4, **kwargs):
         for attempt in range(1, max_retries + 1):
             try:
+                follow_redir = kwargs.pop('follow_redirects', True)
                 if method.upper() == 'GET':
-                    res = await self.client.get(url, **kwargs)
+                    res = await self.client.get(url, follow_redirects=follow_redir, **kwargs)
                 else:
-                    res = await self.client.post(url, **kwargs)
+                    res = await self.client.post(url, follow_redirects=follow_redir, **kwargs)
 
                 # Cek Cloudflare
                 if res.headers.get('cf-mitigated') or "Just a moment" in res.text[:300] or "Checking your browser" in res.text[:300]:

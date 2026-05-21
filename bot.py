@@ -21,7 +21,8 @@ from database import (
     cleanup_all_pending_orders, init_db,
     get_all_accounts_with_status, count_accounts, clear_session_cookies,
     get_all_drafts_overview, get_session_status,
-    set_engine_ready_status, get_engine_ready_status
+    set_engine_ready_status, get_engine_ready_status,
+    get_account_nickname, update_account_nickname, delete_account
 )
 from engine import SiliwangiEngine, CloudflareBlockException
 
@@ -50,8 +51,23 @@ class AkunState(StatesGroup):
 
 class OrderState(StatesGroup):
     waiting_for_template = State()
-    editing_existing     = State() 
+    editing_existing     = State()
     confirming_order     = State()
+
+class EditAkunState(StatesGroup):
+    waiting_for_nickname = State()
+
+
+def _dn(username: str, nickname: str) -> str:
+    """Display Name: tampilkan nickname jika ada, fallback ke username."""
+    return nickname.strip() if nickname and nickname.strip() else username
+
+
+def get_war_panel_button() -> InlineKeyboardMarkup:
+    """Tombol CTA standar yang ditempel di setiap notifikasi otomatis."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Buka Panel War", callback_data="war_panel")]
+    ])
 
 mesin_siaga = {} 
 
@@ -76,7 +92,8 @@ async def job_pemanasan():
     if not orders:
         await bot.send_message(
             ADMIN_ID,
-            "🏖️ **[07:55]** Tidak ada draf pesanan hari ini. Bot tidak aktif."
+            "🏖️ Tidak ada draf pesanan hari ini. Bot tidak aktif.",
+            reply_markup=get_war_panel_button()
         )
         logger.info("[Libur] Tidak ada draf pesanan.")
         return
@@ -88,7 +105,8 @@ async def job_pemanasan():
         f"⚙️ **[07:55] WARM-UP DIMULAI**\n\n"
         f"Ditemukan **{len(orders)} draf** pesanan:\n{draf_info}\n\n"
         f"_Memulai login semua akun..._",
-        parse_mode="Markdown"
+        parse_mode="Markdown",
+        reply_markup=get_war_panel_button()
     )
 
     mesin_siaga[ADMIN_ID] = {}
@@ -123,12 +141,13 @@ async def job_pemanasan():
         if gagal_login:
             status_txt += f"\n❌ Gagal login: " + ", ".join([f"`{u}`" for u in gagal_login])
         status_txt += "\n\n⏳ _Siap eksekusi jam 08:00 WIB._"
-        await bot.send_message(ADMIN_ID, status_txt, parse_mode="Markdown")
+        await bot.send_message(ADMIN_ID, status_txt, parse_mode="Markdown", reply_markup=get_war_panel_button())
     else:
         await bot.send_message(
             ADMIN_ID,
             "🚨 **[GAGAL WARM-UP]**\nTidak ada akun yang berhasil login!\n"
-            "Periksa koneksi server dan kredensial akun."
+            "Periksa koneksi server dan kredensial akun.",
+            reply_markup=get_war_panel_button()
         )
 
 
@@ -202,14 +221,19 @@ async def job_eksekusi():
                 await engine.close()
 
         mesin_siaga.pop(ADMIN_ID, None)
+        war_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📊 Panel War", callback_data="war_panel"),
+             InlineKeyboardButton(text="📜 Riwayat", callback_data="lihat_riwayat")]
+        ])
         try:
-            await bot.send_message(ADMIN_ID, laporan, parse_mode="Markdown")
+            await bot.send_message(ADMIN_ID, laporan, parse_mode="Markdown", reply_markup=war_kb)
         except Exception as e:
             logger.error(f"Gagal kirim laporan WAR ke Telegram: {e}")
             try:
                 await bot.send_message(
                     ADMIN_ID,
-                    laporan.replace('`', '').replace('*', '').replace('_', '')
+                    laporan.replace('`', '').replace('*', '').replace('_', ''),
+                    reply_markup=war_kb
                 )
             except Exception:
                 pass
@@ -270,7 +294,7 @@ async def job_bersihkan_draft():
         logger.info("🧹 Cleanup: Tidak ada draft tersisa.")
 
     try:
-        await bot.send_message(ADMIN_ID, pesan, parse_mode="Markdown")
+        await bot.send_message(ADMIN_ID, pesan, parse_mode="Markdown", reply_markup=get_war_panel_button())
     except Exception:
         pass
 
@@ -324,7 +348,7 @@ async def job_health_check():
         f"_War dimulai jam 08:00 WIB._"
     )
     try:
-        await bot.send_message(ADMIN_ID, pesan, parse_mode="Markdown")
+        await bot.send_message(ADMIN_ID, pesan, parse_mode="Markdown", reply_markup=get_war_panel_button())
     except Exception:
         pass
 
@@ -336,13 +360,11 @@ scheduler.add_job(job_pemanasan,       'cron', hour=7,  minute=55, second=0)
 scheduler.add_job(job_eksekusi,        'cron', hour=8,  minute=0,  second=0)
 scheduler.add_job(job_bersihkan_draft, 'cron', hour=9,  minute=0,  second=0)
 
-def get_main_menu_keyboard():
+def get_main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👥 Kelola Akun", callback_data="menu_akun"),
-         InlineKeyboardButton(text="📦 Susun Pesanan", callback_data="menu_order")],
-        [InlineKeyboardButton(text="🚀 SIAPKAN WAR SEKARANG", callback_data="siapkan_semua")],
-        [InlineKeyboardButton(text="📖 Panduan", callback_data="tutorial:1"),
-         InlineKeyboardButton(text="📜 Riwayat", callback_data="lihat_riwayat")],
+        [InlineKeyboardButton(text="⚙️ Pengaturan", callback_data="menu_pengaturan"),
+         InlineKeyboardButton(text="📦 Input Pesanan", callback_data="menu_order")],
+        [InlineKeyboardButton(text="🚀 Panel War & Eksekusi", callback_data="war_panel")],
     ])
 
 @router.message(Command("help"))
@@ -372,25 +394,22 @@ async def cmd_start(event, state: FSMContext = None):
     user_id = str(event.from_user.id if isinstance(event, Message) else event.from_user.id)
     drafts = get_all_drafts_overview(user_id)
     current_user = get_current_user(user_id)
-    
-    status_text = (
-        "🤖 **WELCOME TO BOT JAGO**\n"
-    )
-    
+
+    status_text = "🤖 *BOT JAGO — War Dashboard*\n━━━━━━━━━━━━━━\n"
+
     if not drafts:
-        status_text += "❌ **Belum ada akun terdaftar.**\n"
-        status_text += "Silakan tambah akun di menu 👥 **Kelola Akun**."
+        status_text += "❌ Belum ada akun terdaftar.\nKlik ⚙️ *Pengaturan* → *Akun Siliwangi* untuk mulai."
     else:
-        status_text += "👥 **STATUS AKUN:**\n"
-        for i, (username, is_active, has_draft, total_maxi, _) in enumerate(drafts, 1):
+        for i, (username, is_active, has_draft, total_maxi, _, nickname) in enumerate(drafts, 1):
             session_ok = get_session_status(user_id, username)
+            dn = _dn(username, nickname)
             s_icon = "🔑" if session_ok else "🚫"
             d_icon = "✅" if has_draft else "📝"
             active_mark = " 🟢" if username == current_user else ""
-            status_text += f"{i}. `{username[:25]}` {s_icon}{d_icon}{active_mark}\n"
-            status_text += f"   └─ Draf: {f'**{total_maxi} Box**' if has_draft else '_Kosong_'}\n"
-    
-    status_text += "\n💡 **Tips:** Klik 🚀 **SIAPKAN WAR** untuk login otomatis semua akun."
+            status_text += f"{i}. *{dn}*{active_mark}\n"
+            status_text += f"   {s_icon}{d_icon}  {f'**{total_maxi} Box**' if has_draft else '_Belum ada draf_'}\n"
+
+    status_text += "\n⏰ _07:55 Warmup · 08:00 War · 09:00 Cleanup_"
 
     if isinstance(event, Message):
         await event.answer(status_text, reply_markup=get_main_menu_keyboard(), parse_mode="Markdown")
@@ -553,6 +572,56 @@ async def cb_tutorial(callback: CallbackQuery):
     )
 
 
+@router.callback_query(F.data == "menu_pengaturan")
+async def cb_menu_pengaturan(callback: CallbackQuery):
+    await callback.answer()
+    teks = (
+        "⚙️ *PENGATURAN*\n"
+        "━━━━━━━━━━━━━━\n"
+        "Kelola akun dan preferensi bot."
+    )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👥 Akun Siliwangi", callback_data="menu_akun")],
+        [InlineKeyboardButton(text="🏠 Kembali ke Menu Utama", callback_data="kembali_ke_menu")],
+    ])
+    await callback.message.edit_text(teks, reply_markup=keyboard, parse_mode="Markdown")
+
+
+@router.callback_query(F.data == "war_panel")
+async def cb_war_panel(callback: CallbackQuery):
+    await callback.answer()
+    tid = str(callback.from_user.id)
+    drafts = get_all_drafts_overview(tid)
+
+    status_lines = []
+    for username, is_active, has_draft, total_maxi, _, nickname in drafts:
+        dn = _dn(username, nickname)
+        session_ok = get_session_status(tid, username)
+        if has_draft and session_ok:
+            icon, ket = "✅", f"{total_maxi} box · Siap"
+        elif has_draft and not session_ok:
+            icon, ket = "⚠️", f"{total_maxi} box · Perlu siapkan"
+        else:
+            icon, ket = "❌", "Belum ada draf"
+        status_lines.append(f"{icon} *{dn}*\n   └─ {ket}")
+
+    status_text = "\n".join(status_lines) if status_lines else "❌ Belum ada akun terdaftar."
+    teks = (
+        "🚀 *PANEL WAR*\n"
+        "━━━━━━━━━━━━━━\n"
+        f"{status_text}\n\n"
+        "⏰ _07:55 Warmup · 08:00 Eksekusi · 09:00 Cleanup_"
+    )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚡ Siapkan Semua Akun", callback_data="siapkan_semua")],
+        [InlineKeyboardButton(text="🌐 Cek Jaringan & Session", callback_data="net_diag"),
+         InlineKeyboardButton(text="📜 Riwayat", callback_data="lihat_riwayat")],
+        [InlineKeyboardButton(text="📖 Panduan", callback_data="tutorial:1"),
+         InlineKeyboardButton(text="🏠 Menu", callback_data="kembali_ke_menu")],
+    ])
+    await callback.message.edit_text(teks, reply_markup=keyboard, parse_mode="Markdown")
+
+
 @router.callback_query(F.data == "menu_akun")
 async def cb_menu_akun(callback: CallbackQuery):
     tid = str(callback.from_user.id)
@@ -562,67 +631,79 @@ async def cb_menu_akun(callback: CallbackQuery):
 
     if not accounts:
         teks = (
-            "👥 **KELOLA AKUN**\n"
+            "👥 *AKUN SILIWANGI*\n"
             "━━━━━━━━━━━━━━\n"
             "❌ Belum ada akun terdaftar.\n\n"
-            "Klik **➕ Tambah Akun** untuk mulai."
+            "Klik *➕ Tambah Akun* untuk mulai."
         )
     else:
         teks = (
-            "👥 **KELOLA AKUN**\n"
+            "👥 *AKUN SILIWANGI*\n"
             "━━━━━━━━━━━━━━\n"
-            "🟢 Aktif dipilih | ⚫ Tidak dipilih\n"
-            "🔑 Sesi tersimpan | 🚫 Perlu login\n"
-            "✅ Ada draf pesanan | 📝 Belum ada draf\n\n"
+            "🟢 Aktif · 🔑 Session · ✅ Ada draf\n\n"
         )
         drafts_overview = get_all_drafts_overview(tid)
         draft_map = {d[0]: d for d in drafts_overview}
-        for acc, is_active, has_session in accounts:
-            aktif_icon  = "🟢" if acc == current else "⚫"
-            sesi_icon   = "🔑" if has_session else "🚫"
-            draft_info  = draft_map.get(acc)
-            draf_icon   = "✅" if draft_info and draft_info[2] else "📝"
-            total_maxi  = draft_info[3] if draft_info and draft_info[2] else 0
-            label = f"{aktif_icon}{sesi_icon}{draf_icon} {acc[:22]}"
+        for acc, is_active, has_session, nickname in accounts:
+            dn = _dn(acc, nickname)
+            aktif_icon = "🟢" if acc == current else "⚫"
+            sesi_icon  = "🔑" if has_session else "🚫"
+            draft_info = draft_map.get(acc)
+            draf_icon  = "✅" if draft_info and draft_info[2] else "📝"
+            total_maxi = draft_info[3] if draft_info and draft_info[2] else 0
+            label = f"{aktif_icon}{sesi_icon}{draf_icon} {dn}"
             if total_maxi > 0:
                 label += f" [{total_maxi}box]"
             keyboard.append([InlineKeyboardButton(text=label, callback_data=f"acc_detail:{acc}")])
 
-    keyboard.append([InlineKeyboardButton(text="➕ Tambah Akun", callback_data="add_new_acc")])
-    keyboard.append([InlineKeyboardButton(text="🔙 Kembali", callback_data="kembali_ke_menu")])
+    keyboard.append([InlineKeyboardButton(text="➕ Tambah Akun Baru", callback_data="add_new_acc")])
+    keyboard.append([InlineKeyboardButton(text="🔙 Pengaturan", callback_data="menu_pengaturan")])
     await callback.message.edit_text(
         teks, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard), parse_mode="Markdown"
     )
 
 @router.callback_query(F.data.startswith("acc_detail:"))
 async def cb_acc_detail(callback: CallbackQuery, state: FSMContext):
-    """Halaman detail akun — set aktif, paksa login ulang."""
+    """Halaman detail akun — tampilkan nickname, set aktif, edit alias, reset login, hapus."""
     tid = str(callback.from_user.id)
     target = callback.data.split(":", 1)[1]
     current = get_current_user(tid)
     has_session = get_session_status(tid, target)
+    nickname = get_account_nickname(tid, target)
+    dn = _dn(target, nickname)
 
-    status_aktif = "🟢 Sedang dipilih untuk input pesanan" if target == current else "⚫ Tidak dipilih"
-    status_siap  = "✅ Siap digunakan saat war" if has_session else "⚠️ Belum siap — klik Siapkan Semua"
+    status_aktif = "🟢 Dipilih untuk input pesanan" if target == current else "⚫ Tidak dipilih"
+    status_siap  = "✅ Siap war" if has_session else "⚠️ Perlu disiapkan"
+    alias_txt    = f"`{nickname}`" if nickname else "_(belum diset)_"
 
     teks = (
-        f"👤 **Detail Akun**\n\n"
-        f"Akun: `{target}`\n"
-        f"Status pilih: {status_aktif}\n"
-        f"Status war: {status_siap}"
+        f"👤 *{dn}*\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"Akun   : `{target}`\n"
+        f"Alias  : {alias_txt}\n"
+        f"Status : {status_aktif}\n"
+        f"War    : {status_siap}"
     )
 
     keyboard = []
     if target != current:
         keyboard.append([InlineKeyboardButton(
-            text="🎯 Pilih Akun Ini untuk Input Pesanan",
+            text="🎯 Jadikan Akun Aktif Input",
             callback_data=f"setacc:{target}"
         )])
     keyboard.append([InlineKeyboardButton(
-        text="🔄 Paksa Login Ulang (jika ada masalah)",
+        text="✏️ Ubah Nama Alias",
+        callback_data=f"edit_nickname:{target}"
+    )])
+    keyboard.append([InlineKeyboardButton(
+        text="🔄 Reset Login (hapus session)",
         callback_data=f"force_relogin:{target}"
     )])
-    keyboard.append([InlineKeyboardButton(text="🔙 Kembali ke Daftar Akun", callback_data="menu_akun")])
+    keyboard.append([InlineKeyboardButton(
+        text="🗑️ Hapus Akun Ini",
+        callback_data=f"hapus_akun:{target}"
+    )])
+    keyboard.append([InlineKeyboardButton(text="🔙 Daftar Akun", callback_data="menu_akun")])
 
     await callback.message.edit_text(
         teks, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard), parse_mode="Markdown"
@@ -632,17 +713,12 @@ async def cb_acc_detail(callback: CallbackQuery, state: FSMContext):
 async def cb_setacc(callback: CallbackQuery, state: FSMContext):
     target_acc = callback.data.split(":", 1)[1]
     set_active_account(str(callback.from_user.id), target_acc)
-    await callback.answer(f"✅ Akun aktif diganti ke: {target_acc}", show_alert=True)
-    # Kembali ke menu akun
+    await callback.answer(f"✅ Akun aktif: {target_acc[:30]}", show_alert=True)
     await cb_menu_akun(callback)
+
 
 @router.callback_query(F.data.startswith("force_relogin:"))
 async def cb_force_relogin(callback: CallbackQuery):
-    """
-    Paksa login ulang — hapus data login tersimpan akun ini.
-    Berguna jika: password diganti, akun bermasalah, atau bot tidak bisa masuk.
-    Bot akan login ulang otomatis saat warm-up jam 07:55.
-    """
     tid = str(callback.from_user.id)
     target = callback.data.split(":", 1)[1]
     clear_session_cookies(tid, target)
@@ -650,9 +726,84 @@ async def cb_force_relogin(callback: CallbackQuery):
         engine = mesin_siaga[ADMIN_ID].pop(target)
         await engine.close()
     await callback.answer(
-        f"✅ Data login {target} direset.\nBot akan login ulang otomatis jam 07:55.",
+        f"✅ Session {target[:30]} direset.\nBot login ulang otomatis jam 07:55.",
         show_alert=True
     )
+    await cb_acc_detail(callback)
+
+
+@router.callback_query(F.data.startswith("edit_nickname:"))
+async def cb_edit_nickname(callback: CallbackQuery, state: FSMContext):
+    target = callback.data.split(":", 1)[1]
+    await state.update_data(edit_target=target)
+    await callback.message.edit_text(
+        f"✏️ *Ubah Nama Alias*\n\n"
+        f"Akun: `{target}`\n\n"
+        f"Ketik nama alias yang mudah diingat.\n"
+        f"Contoh: _Akun Mama_, _Akun Cadangan_\n\n"
+        f"_Ketik /batal untuk membatalkan._",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Batal", callback_data=f"acc_detail:{target}")]
+        ]),
+        parse_mode="Markdown"
+    )
+    await state.set_state(EditAkunState.waiting_for_nickname)
+    await callback.answer()
+
+
+@router.message(EditAkunState.waiting_for_nickname)
+async def process_nickname(message: Message, state: FSMContext):
+    if message.text.startswith('/'):
+        await message.answer("Ketik nama alias (tanpa awalan `/`):")
+        return
+    nickname = message.text.strip()
+    if len(nickname) > 30:
+        await message.answer("⚠️ Nama alias maksimal 30 karakter. Coba lagi:")
+        return
+    data = await state.get_data()
+    target = data.get("edit_target", "")
+    update_account_nickname(str(message.from_user.id), target, nickname)
+    await state.clear()
+    btn = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 Detail Akun", callback_data=f"acc_detail:{target}")]
+    ])
+    await message.answer(
+        f"✅ *Alias berhasil disimpan!*\n\nAkun: `{target}`\nAlias baru: *{nickname}*",
+        reply_markup=btn, parse_mode="Markdown"
+    )
+
+
+@router.callback_query(F.data.startswith("hapus_akun:"))
+async def cb_hapus_akun(callback: CallbackQuery):
+    tid = str(callback.from_user.id)
+    target = callback.data.split(":", 1)[1]
+    nickname = get_account_nickname(tid, target)
+    dn = _dn(target, nickname)
+    teks = (
+        f"⚠️ *KONFIRMASI HAPUS AKUN*\n\n"
+        f"Akun: *{dn}*\n"
+        f"`{target}`\n\n"
+        f"Ini akan menghapus:\n"
+        f"• Data login & session\n"
+        f"• Draf pesanan akun ini\n\n"
+        f"_Tidak bisa dibatalkan!_"
+    )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Ya, Hapus", callback_data=f"confirm_hapus_akun:{target}"),
+         InlineKeyboardButton(text="❌ Batal", callback_data=f"acc_detail:{target}")]
+    ])
+    await callback.message.edit_text(teks, reply_markup=keyboard, parse_mode="Markdown")
+
+
+@router.callback_query(F.data.startswith("confirm_hapus_akun:"))
+async def cb_confirm_hapus_akun(callback: CallbackQuery):
+    tid = str(callback.from_user.id)
+    target = callback.data.split(":", 1)[1]
+    if ADMIN_ID in mesin_siaga and target in mesin_siaga[ADMIN_ID]:
+        engine = mesin_siaga[ADMIN_ID].pop(target)
+        await engine.close()
+    delete_account(tid, target)
+    await callback.answer(f"✅ Akun {target[:30]} dihapus.", show_alert=True)
     await cb_menu_akun(callback)
 
 @router.callback_query(F.data == "add_new_acc")
@@ -726,7 +877,7 @@ async def cb_siapkan_semua(callback: CallbackQuery):
     berhasil = sum(1 for r in results if r[0])
     gagal = [r[1] for r in results if not r[0]]
 
-    baris_hasil = f"✅ **{berhasil}/{len(orders)} akun berhasil disiapkan!**"
+    baris_hasil = f"✅ *{berhasil}/{len(orders)} akun berhasil disiapkan!*"
     if gagal:
         baris_hasil += "\n❌ Gagal: " + ", ".join([f"`{u}`" for u in gagal])
         baris_hasil += "\n\n_Cek username & password akun yang gagal._"
@@ -736,7 +887,7 @@ async def cb_siapkan_semua(callback: CallbackQuery):
     await callback.message.edit_text(
         baris_hasil,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔙 Kembali ke Daftar Akun", callback_data="menu_akun")]
+            [InlineKeyboardButton(text="📊 Kembali ke Panel War", callback_data="war_panel")]
         ]),
         parse_mode="Markdown"
     )
@@ -809,7 +960,7 @@ async def cb_lihat_riwayat(callback: CallbackQuery):
     keyboard.append([InlineKeyboardButton(text="🔙 Kembali ke Menu", callback_data="kembali_ke_menu")])
     await callback.message.edit_text(
         "📜 **RIWAYAT ORDER**\n━━━━━━━━━━━━━━\n"
-        "Pilih tanggal untuk melihat detail order:\n",
+        "Pilih untuk liat detail order:\n",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard),
         parse_mode="Markdown"
     )
@@ -863,7 +1014,7 @@ async def cb_riwayat_tanggal(callback: CallbackQuery):
             teks += "\n"
 
     btn = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔙 Kembali ke Pilihan Tanggal", callback_data="lihat_riwayat")],
+        [InlineKeyboardButton(text="🔙 Kembali ke Tanggal", callback_data="lihat_riwayat")],
         [InlineKeyboardButton(text="🏠 Menu Utama", callback_data="kembali_ke_menu")]
     ])
 
@@ -891,21 +1042,23 @@ async def cb_menu_order(callback: CallbackQuery):
     tid = str(callback.from_user.id)
     overview = get_all_drafts_overview(tid)
     current_user = get_current_user(tid)
-    
+
     teks = (
-        "📦 **SUSUN PESANAN**\n"
+        "📦 *INPUT PESANAN*\n"
         "━━━━━━━━━━━━━━\n"
         "Pilih akun untuk mengelola draf:\n"
     )
-    
+
     keyboard = []
-    for username, is_active, has_draft, total_maxi, _ in overview:
+    for username, is_active, has_draft, total_maxi, _, nickname in overview:
+        dn = _dn(username, nickname)
         d_icon = "✅" if has_draft else "📝"
         active_mark = " 🟢" if username == current_user else ""
-        label = f"{d_icon} {username[:20]}{active_mark}"
+        box_info = f" · {total_maxi}box" if has_draft else ""
+        label = f"{d_icon} {dn}{active_mark}{box_info}"
         keyboard.append([InlineKeyboardButton(text=label, callback_data=f"order_acc:{username}")])
-    
-    keyboard.append([InlineKeyboardButton(text="🔙 Kembali", callback_data="kembali_ke_menu")])
+
+    keyboard.append([InlineKeyboardButton(text="🔙 Menu Utama", callback_data="kembali_ke_menu")])
     await callback.message.edit_text(teks, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard), parse_mode="Markdown")
 
 @router.callback_query(F.data.startswith("order_acc:"))
@@ -942,8 +1095,8 @@ async def cb_start_input_order(callback: CallbackQuery, state: FSMContext):
     current_user = get_current_user(str(callback.from_user.id))
 
     template = (
-        f"📥 **Order untuk Akun: `{current_user}`**\n\n"
-        "Salin dan edit kuantitas & nama semau kamu:\n\n"
+        f"**Order untuk Akun: `{current_user}`**\n\n"
+        "Salin dan edit:\n\n"
         "- 50x MAXI Belgian Chocolate\n"
         "- 50x MAXI Black Forest\n"
         "- 15x MAXI Cokelat Dubai Pistachio\n"
@@ -961,7 +1114,7 @@ async def cb_start_input_order(callback: CallbackQuery, state: FSMContext):
         "- 0x DC Belgian Chocolate\n"
         "- 0x DC Black Forest\n"
         "- 50x Plastik Bolu Klasik HD Isi 3 Box\n"
-        "- 0x Plastik Bakpia Kukus HD Isi 3 Box\n\n"
+        "- 50x Plastik Bakpia Kukus HD Isi 3 Box\n\n"
         "_Salin teks di atas, edit angka, lalu kirim._\n"
         "_Ketik /batal untuk membatalkan._"
     )
@@ -1123,7 +1276,103 @@ async def cb_confirm_simpan_order(callback: CallbackQuery, state: FSMContext):
     )
 
 
+@router.callback_query(F.data == "net_diag")
+async def cb_net_diag(callback: CallbackQuery):
+    """Cek koneksi internet, website target, Cloudflare, dan session akun."""
+    import httpx as _httpx
+    import time as _time
+
+    await callback.answer()
+    await callback.message.edit_text(
+        "🌐 *CEK JARINGAN & SESSION*\n━━━━━━━━━━━━━━\n⏳ Sedang mengecek...",
+        parse_mode="Markdown"
+    )
+
+    tid = str(callback.from_user.id)
+
+    # 1. Cek koneksi bot → internet
+    internet_ok, latency_ms = False, 0
+    try:
+        t0 = _time.monotonic()
+        async with _httpx.AsyncClient(timeout=5.0) as c:
+            await c.get("https://1.1.1.1")
+        latency_ms = int((_time.monotonic() - t0) * 1000)
+        internet_ok = True
+    except Exception:
+        pass
+
+    # 2. Cek website target
+    website_ok, cf_blocked = False, False
+    try:
+        async with _httpx.AsyncClient(timeout=10.0, follow_redirects=True) as c:
+            resp = await c.get("https://siliwangibolukukus.com/")
+            website_ok = resp.status_code < 500
+            cf_blocked = resp.status_code in [403, 503] and "cloudflare" in resp.text.lower()
+    except Exception:
+        pass
+
+    # 3. Cek session per akun
+    accounts = get_all_accounts_with_status(tid)
+    session_lines = []
+    for acc, _, has_session, nickname in accounts:
+        dn = _dn(acc, nickname)
+        icon = "✅" if has_session else "⚠️"
+        keterangan = "Aktif" if has_session else "Expired / belum login"
+        session_lines.append(f"  {icon} *{dn}* — {keterangan}")
+
+    inet_txt = f"✅ OK ({latency_ms}ms)" if internet_ok else "❌ Tidak terhubung"
+    if not website_ok:
+        web_txt = "❌ Tidak dapat dijangkau"
+    elif cf_blocked:
+        web_txt = "⚠️ Cloudflare memblokir"
+    else:
+        web_txt = "✅ Online"
+    sesi_txt = "\n".join(session_lines) if session_lines else "  _(tidak ada akun)_"
+
+    teks = (
+        "🌐 *CEK JARINGAN & SESSION*\n"
+        "━━━━━━━━━━━━━━\n"
+        f"🔌 Koneksi Bot     : {inet_txt}\n"
+        f"🌍 Website Target  : {web_txt}\n\n"
+        f"🔑 *Session Akun:*\n{sesi_txt}"
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Cek Ulang", callback_data="net_diag"),
+         InlineKeyboardButton(text="🧹 Reset Semua Session", callback_data="net_diag_reset_confirm")],
+        [InlineKeyboardButton(text="🔙 Panel War", callback_data="war_panel")]
+    ])
+    await callback.message.edit_text(teks, reply_markup=keyboard, parse_mode="Markdown")
+
+
+@router.callback_query(F.data == "net_diag_reset_confirm")
+async def cb_net_diag_reset_confirm(callback: CallbackQuery):
+    await callback.message.edit_text(
+        "⚠️ *KONFIRMASI RESET SESSION*\n\n"
+        "Semua cookie login akan dihapus.\n"
+        "Bot perlu login ulang saat warm-up 07:55.\n\n"
+        "_Yakin ingin reset?_",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Ya, Reset Semua", callback_data="net_diag_reset_execute"),
+             InlineKeyboardButton(text="❌ Batal", callback_data="net_diag")]
+        ]),
+        parse_mode="Markdown"
+    )
+
+
+@router.callback_query(F.data == "net_diag_reset_execute")
+async def cb_net_diag_reset_execute(callback: CallbackQuery):
+    tid = str(callback.from_user.id)
+    accounts = get_all_accounts(tid)
+    for username, _ in accounts:
+        clear_session_cookies(tid, username)
+    mesin_siaga.pop(ADMIN_ID, None)
+    await callback.answer("✅ Semua session berhasil direset!", show_alert=True)
+    await cb_net_diag(callback)
+
+
 async def main():
+
     init_db() 
     dp.include_router(router)
     scheduler.start()

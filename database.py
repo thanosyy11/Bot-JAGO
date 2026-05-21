@@ -104,6 +104,7 @@ def init_db():
             username TEXT,
             password TEXT,
             is_active INTEGER DEFAULT 0,
+            nickname TEXT DEFAULT NULL,
             UNIQUE(telegram_id, username)
         )
     ''')
@@ -159,6 +160,7 @@ def init_db():
 
     # Migrasi kolom yang mungkin belum ada di DB lama
     add_column_if_missing("users",         "is_active",   "INTEGER DEFAULT 0")
+    add_column_if_missing("users",         "nickname",    "TEXT DEFAULT NULL")
     add_column_if_missing("draft_orders",  "total_maxi",  "INTEGER")
     add_column_if_missing("draft_orders",  "created_at",  "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
     add_column_if_missing("order_history", "order_id",    "TEXT")
@@ -315,13 +317,13 @@ def get_session_status(telegram_id: str, username: str) -> bool:
 
 def get_all_accounts_with_status(telegram_id: str) -> list:
     """
-    Return list of (username, is_active, has_session).
+    Return list of (username, is_active, has_session, nickname).
     Digunakan di menu akun untuk tampilkan status login setiap akun.
     """
     conn = sqlite3.connect(DB_NAME, timeout=10)
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT username, is_active FROM users WHERE telegram_id = ? ORDER BY is_active DESC, username ASC",
+        "SELECT username, is_active, COALESCE(nickname, '') FROM users WHERE telegram_id = ? ORDER BY is_active DESC, username ASC",
         (telegram_id,)
     )
     rows = cursor.fetchall()
@@ -332,7 +334,7 @@ def get_all_accounts_with_status(telegram_id: str) -> list:
     )
     session_users = {r[0] for r in cursor.fetchall()}
     conn.close()
-    return [(u, is_active, u in session_users) for u, is_active in rows]
+    return [(u, is_active, u in session_users, nick) for u, is_active, nick in rows]
 
 def count_accounts(telegram_id: str) -> int:
     """Hitung jumlah akun terdaftar."""
@@ -342,6 +344,43 @@ def count_accounts(telegram_id: str) -> int:
     row = cursor.fetchone()
     conn.close()
     return row[0] if row else 0
+
+
+def get_account_nickname(telegram_id: str, username: str) -> str:
+    """Ambil nickname akun. Return string kosong jika belum diset."""
+    conn = sqlite3.connect(DB_NAME, timeout=10)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT COALESCE(nickname, '') FROM users WHERE telegram_id=? AND username=?",
+        (telegram_id, username)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else ''
+
+
+def update_account_nickname(telegram_id: str, username: str, nickname: str) -> None:
+    """Simpan atau perbarui nickname untuk akun."""
+    conn = sqlite3.connect(DB_NAME, timeout=10)
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE users SET nickname=? WHERE telegram_id=? AND username=?",
+        (nickname.strip(), telegram_id, username)
+    )
+    conn.commit()
+    conn.close()
+
+
+def delete_account(telegram_id: str, username: str) -> None:
+    """Hapus akun beserta seluruh data terkait (session, draft, engine status)."""
+    conn = sqlite3.connect(DB_NAME, timeout=10)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM users WHERE telegram_id=? AND username=?", (telegram_id, username))
+    cursor.execute("DELETE FROM sessions WHERE telegram_id=? AND username=?", (telegram_id, username))
+    cursor.execute("DELETE FROM draft_orders WHERE telegram_id=? AND username=?", (telegram_id, username))
+    cursor.execute("DELETE FROM engine_ready_status WHERE telegram_id=? AND username=?", (telegram_id, username))
+    conn.commit()
+    conn.close()
 
 # ============================================================
 # CRUD DRAFT ORDERS
@@ -446,13 +485,13 @@ def cleanup_all_pending_orders(telegram_id):
 def get_all_drafts_overview(telegram_id: str) -> list:
     """
     Untuk menu kelola: ambil status draf semua akun.
-    Return: list of (username, is_active, has_draft, total_maxi, tgl_buat)
+    Return: list of (username, is_active, has_draft, total_maxi, tgl_buat, nickname)
     """
     conn = sqlite3.connect(DB_NAME, timeout=10)
     cursor = conn.cursor()
     # Semua akun terdaftar
     cursor.execute(
-        "SELECT username, is_active FROM users WHERE telegram_id=? ORDER BY is_active DESC, username ASC",
+        "SELECT username, is_active, COALESCE(nickname, '') FROM users WHERE telegram_id=? ORDER BY is_active DESC, username ASC",
         (telegram_id,)
     )
     accounts = cursor.fetchall()
@@ -473,12 +512,12 @@ def get_all_drafts_overview(telegram_id: str) -> list:
     conn.close()
 
     result = []
-    for username, is_active in accounts:
+    for username, is_active, nickname in accounts:
         if username in drafts:
             total_maxi, tgl_buat = drafts[username]
-            result.append((username, is_active, True, total_maxi, tgl_buat))
+            result.append((username, is_active, True, total_maxi, tgl_buat, nickname))
         else:
-            result.append((username, is_active, False, 0, None))
+            result.append((username, is_active, False, 0, None, nickname))
     return result
 
 
