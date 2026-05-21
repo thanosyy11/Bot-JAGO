@@ -71,10 +71,10 @@ def ensure_encryption_key():
 def init_db():
     # Pastikan key ada sebelum melakukan apa pun
     ensure_encryption_key()
-    
+
     conn = sqlite3.connect(DB_NAME, timeout=10)
     cursor = conn.cursor()
-    
+
     # Fungsi bantu migrasi kolom
     def add_column_if_missing(table, column, definition):
         try:
@@ -82,11 +82,15 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
-    # Tabel produk
+    # ── Tabel produk ──────────────────────────────────────────────────────────
+    # DROP + RECREATE setiap startup untuk membersihkan duplikat historis
+    # dan memastikan ID produk selalu sinkron dengan list di bawah.
+    # Produk TIDAK disimpan user — selalu dari hardcoded list ini.
+    cursor.execute("DROP TABLE IF EXISTS products")
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS products (
+        CREATE TABLE products (
             id INTEGER PRIMARY KEY,
-            nama TEXT UNIQUE,
+            nama TEXT UNIQUE NOT NULL,
             kategori TEXT,
             tier INTEGER
         )
@@ -126,14 +130,11 @@ def init_db():
             total_maxi INTEGER,
             payload_json TEXT,
             order_id TEXT,
+            status TEXT DEFAULT 'SUKSES',
+            total_nominal TEXT DEFAULT '',
             tanggal TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    # Jalankan migrasi jika tabel sudah ada tapi kolom belum lengkap
-    add_column_if_missing("users", "is_active", "INTEGER DEFAULT 0")
-    add_column_if_missing("draft_orders", "total_maxi", "INTEGER")
-    add_column_if_missing("draft_orders", "created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-    add_column_if_missing("order_history", "order_id", "TEXT")
 
     # Tabel engine_ready_status
     cursor.execute('''
@@ -145,7 +146,7 @@ def init_db():
         )
     ''')
 
-    # Tabel sessions — simpan cookies httpx per akun untuk resume tanpa login ulang
+    # Tabel sessions
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS sessions (
             telegram_id TEXT,
@@ -156,39 +157,44 @@ def init_db():
         )
     ''')
 
+    # Migrasi kolom yang mungkin belum ada di DB lama
+    add_column_if_missing("users",         "is_active",   "INTEGER DEFAULT 0")
+    add_column_if_missing("draft_orders",  "total_maxi",  "INTEGER")
+    add_column_if_missing("draft_orders",  "created_at",  "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+    add_column_if_missing("order_history", "order_id",    "TEXT")
+    add_column_if_missing("order_history", "status",      "TEXT DEFAULT 'SUKSES'")
+    add_column_if_missing("order_history", "total_nominal", "TEXT DEFAULT ''")
+
+    # ── Data produk (single source of truth) ─────────────────────────────────
     products = [
         # === MAXI Tier 1 ===
         (251993, "MAXI Belgian Chocolate",       "MAXI", 1),
-        (36124,  "MAXI Black Forest",             "MAXI", 1),
-        (281180, "MAXI Cokelat Dubai Pistachio",  "MAXI", 1),
-        (168132, "MAXI Cokelat Tiramisu",         "MAXI", 1),
-        (312,    "MAXI Brownies Coklat",          "MAXI", 1),
+        (36124,  "MAXI Black Forest",            "MAXI", 1),
+        (281180, "MAXI Cokelat Dubai Pistachio", "MAXI", 1),
+        (168132, "MAXI Cokelat Tiramisu",        "MAXI", 1),
+        (312,    "MAXI Brownies Coklat",         "MAXI", 1),
         # === MAXI Tier 2 ===
-        (306,    "MAXI Susu Lembang",             "MAXI", 2),
-        (19077,  "MAXI Pandan Wangi",             "MAXI", 2),
-        (24883,  "MAXI Red Velvet",               "MAXI", 2),
-        (313,    "MAXI Talas Bogor",              "MAXI", 2),
-        (168131, "MAXI Durian Musang King",       "MAXI", 2),
+        (306,    "MAXI Susu Lembang",            "MAXI", 2),
+        (19077,  "MAXI Pandan Wangi",            "MAXI", 2),
+        (24883,  "MAXI Red Velvet",              "MAXI", 2),
+        (313,    "MAXI Talas Bogor",             "MAXI", 2),
+        (168131, "MAXI Durian Musang King",      "MAXI", 2),
         # === MAXI Tier 3 ===
-        (311,    "MAXI Alpukat Mentega",          "MAXI", 3),
-        (74878,  "MAXI Keju Cheddar",             "MAXI", 3),
-        (132503, "MAXI Black Pink",               "MAXI", 3),
-        (58972,  "MAXI Durian Montong",           "MAXI", 3),
-        (315,    "MAXI Mangga Indramayu",         "MAXI", 3),
-        (219722, "MAXI Original Lapis",           "MAXI", 3),
-        # === Dessert Cake (DC) Tier 1 ===
-        (206125, "DC Belgian Chocolate",          "DC",   1),
-        (54383,  "DC Black Forest",               "DC",   1),
-        (54386,  "DC Red Velvet",                 "DC",   1),        
+        (311,    "MAXI Alpukat Mentega",         "MAXI", 3),
+        (74878,  "MAXI Keju Cheddar",            "MAXI", 3),
+        (132503, "MAXI Black Pink",              "MAXI", 3),
+        (58972,  "MAXI Durian Montong",          "MAXI", 3),
+        (315,    "MAXI Mangga Indramayu",        "MAXI", 3),
+        (219722, "MAXI Original Lapis",          "MAXI", 3),
+        # === Dessert Cake (DC) — Simple Products ===
+        (206125, "DC Belgian Chocolate",         "DC",   1),
+        (54383,  "DC Black Forest",              "DC",   1),
+        (54386,  "DC Red Velvet",                "DC",   1),
         # === Kemasan ===
-        (70867,  "Plastik Bolu Klasik HD Isi 3 Box",  "PLASTIK", 0),
+        (70867,  "Plastik Bolu Klasik HD Isi 3 Box",   "PLASTIK", 0),
         (137748, "Plastik Bakpia Kukus HD Isi 3 Box",  "PLASTIK", 0),
     ]
 
-    cursor.execute("DELETE FROM products WHERE id = 85922")
-    cursor.execute("DELETE FROM products WHERE nama LIKE '%Alt%' AND kategori = 'PLASTIK'")
-
-    # ── Insert / Update produk (INSERT OR REPLACE agar selalu sinkron) ────────
     cursor.executemany('''
         INSERT OR REPLACE INTO products (id, nama, kategori, tier)
         VALUES (?, ?, ?, ?)
@@ -496,32 +502,84 @@ def get_all_products_dict():
 # RIWAYAT ORDER
 # ============================================================
 
-def get_order_history(telegram_id, username):
+def get_order_history_dates(telegram_id: str) -> list:
+    """
+    Ambil 5 tanggal unik terbaru yang punya riwayat order (semua akun).
+    Return: list of date strings 'YYYY-MM-DD', urut terbaru dulu.
+    """
     conn = sqlite3.connect(DB_NAME, timeout=10)
     cursor = conn.cursor()
-    # Cek apakah kolom 'status' sudah ada di order_history
-    cursor.execute("PRAGMA table_info(order_history)")
-    cols = {row[1] for row in cursor.fetchall()}
-    if 'status' in cols:
+    cursor.execute('''
+        SELECT DISTINCT date(tanggal, 'localtime') as tgl
+        FROM order_history
+        WHERE telegram_id = ?
+        ORDER BY tgl DESC
+        LIMIT 5
+    ''', (telegram_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [r[0] for r in rows]
+
+
+def get_order_history_by_date(telegram_id: str, date_str: str) -> list:
+    """
+    Ambil semua order pada tanggal tertentu (semua akun).
+    Return: list of (jam, username, total_maxi, payload_json, order_id, status, total_nominal)
+    """
+    conn = sqlite3.connect(DB_NAME, timeout=10)
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT
+            time(tanggal, 'localtime')      as jam,
+            username,
+            total_maxi,
+            payload_json,
+            COALESCE(order_id, 'N/A')       as order_id,
+            COALESCE(status, 'SUKSES')      as status,
+            COALESCE(total_nominal, '')     as total_nominal
+        FROM order_history
+        WHERE telegram_id = ?
+          AND date(tanggal, 'localtime') = ?
+        ORDER BY tanggal ASC
+    ''', (telegram_id, date_str))
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+def save_failed_order(telegram_id: str, username: str, total_maxi: int,
+                      payload_json: str, reason: str):
+    """Simpan riwayat order GAGAL ke order_history."""
+    conn = sqlite3.connect(DB_NAME, timeout=10)
+    cursor = conn.cursor()
+    try:
         cursor.execute('''
-            SELECT datetime(tanggal, 'localtime'), total_maxi, payload_json,
-                   COALESCE(status, 'SUKSES') as status
-            FROM order_history
-            WHERE telegram_id=? AND username=?
-            ORDER BY id DESC LIMIT 20
-        ''', (telegram_id, username))
-    else:
-        cursor.execute('''
-            SELECT datetime(tanggal, 'localtime'), total_maxi, payload_json,
-                   'SUKSES' as status
-            FROM order_history
-            WHERE telegram_id=? AND username=?
-            ORDER BY id DESC LIMIT 20
-        ''', (telegram_id, username))
+            INSERT INTO order_history
+                (telegram_id, username, total_maxi, payload_json, order_id, status, total_nominal)
+            VALUES (?, ?, ?, ?, 'N/A', 'GAGAL', ?)
+        ''', (telegram_id, username, total_maxi, payload_json, reason[:120]))
+        conn.commit()
+    except Exception as e:
+        logger.error(f"save_failed_order error: {e}")
+    finally:
+        conn.close()
+
+
+def get_order_history(telegram_id, username):
+    """Legacy — ambil riwayat per akun, maks 20 entri terakhir."""
+    conn = sqlite3.connect(DB_NAME, timeout=10)
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT datetime(tanggal, 'localtime'), total_maxi, payload_json,
+               COALESCE(status, 'SUKSES') as status
+        FROM order_history
+        WHERE telegram_id=? AND username=?
+        ORDER BY id DESC LIMIT 20
+    ''', (telegram_id, username))
     rows = cursor.fetchall()
     conn.close()
     return rows
 
 
 if __name__ == "__main__":
-    init_db()
+    init_db()

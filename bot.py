@@ -17,7 +17,8 @@ from database import (
     save_user_credentials, get_all_products_dict, simpan_draft_order,
     get_current_user, get_pending_order, delete_pending_order,
     get_all_accounts, set_active_account, get_all_pending_orders_multi,
-    get_order_history, cleanup_all_pending_orders, init_db,
+    get_order_history, get_order_history_dates, get_order_history_by_date,
+    cleanup_all_pending_orders, init_db,
     get_all_accounts_with_status, count_accounts, clear_session_cookies,
     get_all_drafts_overview, get_session_status,
     set_engine_ready_status, get_engine_ready_status
@@ -60,7 +61,13 @@ async def eksekusi_dengan_jeda(engine, delay, username):
 
     logger.info(f"[WAR] akun: {username} (Delay: {delay:.1f}s)")
     hasil = await engine.execute_order()
-    return username, hasil, engine.step_log, getattr(engine, 'order_id_woo', 'UNKNOWN')
+    return (
+        username,
+        hasil,
+        engine.step_log,
+        getattr(engine, 'order_id_woo', 'UNKNOWN'),
+        getattr(engine, 'substitusi_log', []),
+    )
 
 async def job_pemanasan():
     logger.info("Warm Up (07:55)...")
@@ -157,21 +164,39 @@ async def job_eksekusi():
 
         hasil_perang = await asyncio.gather(*tasks)
 
-        # ─── Laporan WAR ───────────────────────────────────────────
-        laporan = "📊 **HASIL WAR 08:00 WIB:**\n\n"
-        for target_username, is_success, step_log, order_id_woo in hasil_perang:
-            status = "✅ BERHASIL" if is_success else "❌ GAGAL/HABIS"
-            if is_success and order_id_woo != "UNKNOWN":
-                status += f" (Order ID: `{order_id_woo}`)"
-            laporan += f"👤 `{target_username}`: {status}\n"
+        # ─── Susun Laporan WAR ────────────────────────────────────────
+        zona_wib = pytz.timezone('Asia/Jakarta')
+        jam_war  = datetime.now(zona_wib).strftime("%H:%M")
+        laporan  = f"📊 **HASIL WAR {jam_war} WIB:**\n\n"
 
-            if not is_success and step_log:
-                error_lines = [line for line in step_log if any(icon in line for icon in ["❌", "⚠️"])]
-                if error_lines:
-                    error_reason = error_lines[-1][:80]
-                    laporan += f"   └─ {error_reason}\n"
+        for target_username, is_success, step_log, order_id_woo, substitusi_log in hasil_perang:
+            if is_success:
+                laporan += f"👤 `{target_username}`: ✅ **BERHASIL**"
+                if order_id_woo and order_id_woo != "UNKNOWN":
+                    laporan += f" (Order ID: `#{order_id_woo}`)"
+                laporan += "\n"
+                # Tampilkan catatan substitusi/habis jika ada
+                if substitusi_log:
+                    laporan += "   📝 _Catatan stok:_\n"
+                    for catatan in substitusi_log:
+                        laporan += f"   └─ {catatan}\n"
+            else:
+                laporan += f"👤 `{target_username}`: ❌ **GAGAL**\n"
+                # Ambil penyebab kegagalan dari step_log
+                if step_log:
+                    err_lines = [
+                        line for line in step_log
+                        if any(icon in line for icon in ["❌", "⚠️"])
+                    ]
+                    if err_lines:
+                        laporan += f"   └─ Penyebab: {err_lines[-1][:100]}\n"
+                # Juga tampilkan substitusi_log jika ada (sebelum gagal)
+                if substitusi_log:
+                    for catatan in substitusi_log:
+                        laporan += f"   └─ {catatan}\n"
+            laporan += "\n"
 
-        for target_username, is_success, step_log, order_id_woo in hasil_perang:
+        for target_username, is_success, step_log, order_id_woo, substitusi_log in hasil_perang:
             engine = pasukan.get(target_username)
             if engine:
                 await engine.close()
@@ -181,9 +206,11 @@ async def job_eksekusi():
             await bot.send_message(ADMIN_ID, laporan, parse_mode="Markdown")
         except Exception as e:
             logger.error(f"Gagal kirim laporan WAR ke Telegram: {e}")
-            # Coba kirim versi plain text sebagai fallback
             try:
-                await bot.send_message(ADMIN_ID, laporan.replace('`', '').replace('*', '').replace('_', ''))
+                await bot.send_message(
+                    ADMIN_ID,
+                    laporan.replace('`', '').replace('*', '').replace('_', '')
+                )
             except Exception:
                 pass
         logger.info("War Selesai.")
@@ -751,13 +778,15 @@ async def process_password(message: Message, state: FSMContext):
 
 @router.callback_query(F.data == "lihat_riwayat")
 async def cb_lihat_riwayat(callback: CallbackQuery):
-    """Riwayat semua akun — menampilkan 20 order terakhir per akun."""
+    """Tampilkan 5 tanggal terbaru sebagai tombol pilihan."""
     await callback.answer()
     tid = str(callback.from_user.id)
-    accounts = get_all_accounts(tid)
-    if not accounts:
+    dates = get_order_history_dates(tid)
+
+    if not dates:
         await callback.message.edit_text(
-            "⚠️ **Belum ada akun terdaftar.**",
+            "📜 **RIWAYAT ORDER**\n━━━━━━━━━━━━━━\n"
+            "_(Belum ada riwayat order tersimpan.)_",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔙 Kembali", callback_data="kembali_ke_menu")]
             ]),
@@ -765,41 +794,83 @@ async def cb_lihat_riwayat(callback: CallbackQuery):
         )
         return
 
-    teks = "📜 **RIWAYAT ORDER**\n━━━━━━━━━━━━━━\n\n"
-    ada_riwayat = False
+    keyboard = []
+    hari_id = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
+    bulan_id = ["", "Jan", "Feb", "Mar", "Apr", "Mei", "Jun",
+                "Jul", "Agu", "Sep", "Okt", "Nov", "Des"]
+    for d in dates:
+        try:
+            dt = datetime.strptime(d, "%Y-%m-%d")
+            label = f"📅 {dt.day} {bulan_id[dt.month]} {dt.year} ({hari_id[dt.weekday()]})"
+        except Exception:
+            label = f"📅 {d}"
+        keyboard.append([InlineKeyboardButton(text=label, callback_data=f"riwayat_tgl:{d}")])
 
-    for acc, _ in accounts:
-        rows = get_order_history(tid, acc)
-        if not rows:
-            teks += f"👤 `{acc[:30]}`\n"
-            teks += "   _Belum ada riwayat._\n\n"
-            continue
-        ada_riwayat = True
-        teks += f"👤 `{acc[:30]}`\n"
-        for row in rows:
-            # row = (tgl, total_maxi, payload_json, status) — 4 kolom
-            tgl    = row[0]
-            total  = row[1]
-            payload = row[2]
-            status = row[3] if len(row) > 3 else "SUKSES"
+    keyboard.append([InlineKeyboardButton(text="🔙 Kembali ke Menu", callback_data="kembali_ke_menu")])
+    await callback.message.edit_text(
+        "📜 **RIWAYAT ORDER**\n━━━━━━━━━━━━━━\n"
+        "Pilih tanggal untuk melihat detail order:\n",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard),
+        parse_mode="Markdown"
+    )
+
+
+@router.callback_query(F.data.startswith("riwayat_tgl:"))
+async def cb_riwayat_tanggal(callback: CallbackQuery):
+    """Tampilkan detail semua order pada tanggal yang dipilih."""
+    await callback.answer()
+    tid  = str(callback.from_user.id)
+    date_str = callback.data.split(":", 1)[1]  # 'YYYY-MM-DD'
+
+    rows = get_order_history_by_date(tid, date_str)
+
+    # Format judul tanggal
+    bulan_id = ["", "Januari", "Februari", "Maret", "April", "Mei", "Juni",
+                "Juli", "Agustus", "September", "Oktober", "November", "Desember"]
+    try:
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        judul = f"{dt.day} {bulan_id[dt.month]} {dt.year}"
+    except Exception:
+        judul = date_str
+
+    teks = f"📋 **RIWAYAT {judul.upper()}**\n━━━━━━━━━━━━━━━━━━\n\n"
+
+    if not rows:
+        teks += "_(Tidak ada data untuk tanggal ini.)_"
+    else:
+        for jam, username, total_maxi, payload_json, order_id, status, total_nominal in rows:
             status_icon = "✅" if status == "SUKSES" else "❌"
+            teks += f"{status_icon} **{jam[:5]} WIB** — `{username[:28]}`\n"
+            if order_id and order_id not in ('N/A', 'UNKNOWN'):
+                teks += f"   🔖 Order ID: `#{order_id}`\n"
+            if total_nominal:
+                teks += f"   💰 Total: **{total_nominal}**\n"
+            teks += f"   📦 MAXI: **{total_maxi} box**\n"
+            # Uraian item
             try:
-                keranjang = json.loads(payload)
-                preview = ", ".join([f"{i['qty']}x {i['nama']}" for i in keranjang[:2]])
-                if len(keranjang) > 2:
-                    preview += f" +{len(keranjang)-2} item"
+                keranjang = json.loads(payload_json)
+                uraian = ", ".join(
+                    [f"{i['qty']}x {i['nama']}" for i in keranjang]
+                )
+                # Potong jika terlalu panjang
+                if len(uraian) > 200:
+                    uraian = uraian[:197] + "..."
+                teks += f"   🛒 {uraian}\n"
             except Exception:
-                preview = "_data tidak terbaca_"
-            teks += f"  {status_icon} {tgl[:16]} — **{total} Box**\n"
-            teks += f"     └─ {preview}\n"
-        teks += "\n"
-
-    if not ada_riwayat:
-        teks += "_(Semua akun belum memiliki riwayat order yang tersimpan.)_"
+                teks += "   🛒 _(data tidak terbaca)_\n"
+            if status == "GAGAL" and total_nominal:
+                teks += f"   ⚠️ Alasan: _{total_nominal}_\n"
+            teks += "\n"
 
     btn = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔙 Kembali ke Menu", callback_data="kembali_ke_menu")]
+        [InlineKeyboardButton(text="🔙 Kembali ke Pilihan Tanggal", callback_data="lihat_riwayat")],
+        [InlineKeyboardButton(text="🏠 Menu Utama", callback_data="kembali_ke_menu")]
     ])
+
+    # Potong pesan jika > 4096 karakter (limit Telegram)
+    if len(teks) > 4000:
+        teks = teks[:3997] + "..."
+
     await callback.message.edit_text(teks, reply_markup=btn, parse_mode="Markdown")
 
 @router.callback_query(F.data == "hapus_order")

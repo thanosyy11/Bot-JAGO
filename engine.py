@@ -38,7 +38,9 @@ class SiliwangiEngine:
         self.checkout_nonce = None
         self.security_nonce = None
         self.order_id = None
+        self.order_id_woo = "UNKNOWN"
         self.step_log = []
+        self.substitusi_log = []  # Varian habis/disubstitusi saat war
 
         # Session recovery tracking
         self.last_session_check_at = None
@@ -475,24 +477,24 @@ class SiliwangiEngine:
 
     async def _smart_maxi_fill(self, maxi_items: list) -> int:
         """
-        Mengisi keranjang MAXI dengan cerdas:
-        - Partial fill: amankan stok sisa, lanjut ke produk berikutnya
-        - Tier chain: Tier 1 → Tier 2 → Tier 3
-        - Tier 3 only cut: jika hanya Tier 3 tersedia, potong 40%
+        Mengisi keranjang MAXI dengan cerdas.
+
+        Logika Tier (BENAR):
+        - Priority queue diurutkan Tier 1 → Tier 2 → Tier 3 (bukan urutan input user)
+        - Dalam tier yang sama, item yang di-request user diutamakan
+        - Jika Tier 2 habis → bot coba Tier 1 dulu (fallback), lalu Tier 2 lain
+        - Tier 3 cut 40%: berlaku setiap pertama kali bot masuk Tier 3
+          (bukan hanya jika Tier 1+2 = 0), hasil harus kelipatan 12
 
         Return: total qty MAXI yang berhasil masuk keranjang
         """
         total_needed = sum(item['qty'] for item in maxi_items)
         remaining    = total_needed
         total_added  = 0
-        tiers_contributed = set()   # Tier mana saja yang berhasil masuk
+        tiers_contributed = set()
         tier3_cut_applied = False
 
-        # ── Bangun priority queue ────────────────────────────────────────
-        # 1. Item yang diminta user (urutan asli input)
-        # 2. Produk MAXI lain dari DB (belum di-request, sebagai fallback)
-        user_ids = {item['id'] for item in maxi_items}
-
+        # ── Ambil semua produk MAXI dari DB ─────────────────────────────
         conn = sqlite3.connect(DB_NAME, timeout=10)
         cursor = conn.cursor()
         cursor.execute('''
@@ -503,13 +505,24 @@ class SiliwangiEngine:
         all_maxi_db = {row[0]: row for row in cursor.fetchall()}
         conn.close()
 
-        # Priority queue: user's items first, then DB fallbacks
-        priority_queue = list(maxi_items)  # dicts dengan 'id','nama','qty','tier'
-        for prod_id, (pid, pnama, ptier) in all_maxi_db.items():
-            if prod_id not in user_ids:
-                priority_queue.append({'id': pid, 'nama': pnama,
-                                       'qty': 0, 'tier': ptier,
-                                       'kategori': 'MAXI', '_fallback': True})
+        # ── Bangun priority queue: TIER ASC, user items dulu dalam tier-nya ──
+        # Mulai dari DB items sebagai base (fallback)
+        merged = {}
+        for pid, (p_id, pnama, ptier) in all_maxi_db.items():
+            merged[p_id] = {
+                'id': p_id, 'nama': pnama, 'qty': 0,
+                'tier': ptier, 'kategori': 'MAXI', '_fallback': True
+            }
+        # Override dengan user items (simpan qty asli, tandai bukan fallback)
+        for item in maxi_items:
+            merged[item['id']] = {**item, '_fallback': False}
+
+        # Sort: Tier 1 dulu, lalu Tier 2, lalu Tier 3.
+        # Dalam tier yang sama: user items (not fallback) diproses lebih dulu.
+        priority_queue = sorted(
+            merged.values(),
+            key=lambda x: (x['tier'], 1 if x.get('_fallback') else 0)
+        )
 
         # ── Proses setiap produk dalam antrian ───────────────────────────
         for product in priority_queue:
@@ -518,14 +531,14 @@ class SiliwangiEngine:
 
             tier = product.get('tier', 1)
 
-            # Tier 3 cut — hanya 1x, hanya jika Tier 1 & 2 tidak berkontribusi
-            if (tier == 3
-                    and not tier3_cut_applied
-                    and tiers_contributed.isdisjoint({1, 2})):
+            # Tier 3 cut — berlaku PERTAMA KALI bot masuk Tier 3
+            if tier == 3 and not tier3_cut_applied:
                 cut = max(12, (int(remaining * 0.60) // 12) * 12)
-                logger.info(f"✂️ [{self.username}] Tier 3 only — potong 40%: {remaining}x → {cut}x")
-                self._step("✂️", "Tier 3 Only",
-                           f"Semua T1+T2 habis. Target dipotong 40%: {remaining}→{cut}x")
+                logger.info(
+                    f"✂️ [{self.username}] Masuk Tier 3 — potong 40%: {remaining}x → {cut}x"
+                )
+                self._step("✂️", "Potong 40% (Tier 3)",
+                           f"{remaining}x → {cut}x (kelipatan 12)")
                 remaining = cut
                 tier3_cut_applied = True
 
@@ -544,13 +557,29 @@ class SiliwangiEngine:
                 if added < qty_to_try:
                     self._step("⚡", f"{product['nama']}",
                                f"Parsial {added}/{qty_to_try}x (sisa {remaining}x)")
+                    if not product.get('_fallback'):  # Stok parsial dari item user request
+                        self.substitusi_log.append(
+                            f"⚡ {product['nama']}: stok parsial {added}/{qty_to_try}x"
+                        )
                 else:
                     self._step("🛒", f"{added}x {product['nama']}", "Masuk")
+                    # Jika ini fallback (bukan request asli user) → catat sebagai substitusi
+                    if product.get('_fallback') and tier <= 2:
+                        self.substitusi_log.append(
+                            f"🔄 Substitusi: +{added}x {product['nama']} (Tier {tier})"
+                        )
             else:
                 self._step("⚠️", f"{product['nama']}", "Habis / Gagal")
+                # Catat varian habis — hanya item yang diminta user (bukan fallback)
+                if not product.get('_fallback'):
+                    self.substitusi_log.append(
+                        f"❌ {product['nama']} (Tier {tier}): HABIS"
+                    )
 
         if remaining > 0:
-            logger.warning(f"⚠️ [{self.username}] MAXI kurang {remaining}x dari target {total_needed}x")
+            logger.warning(
+                f"⚠️ [{self.username}] MAXI kurang {remaining}x dari target {total_needed}x"
+            )
             self._step("⚠️", "MAXI", f"Kurang {remaining}x dari {total_needed}x")
 
         logger.info(f"✅ [{self.username}] Total MAXI masuk keranjang: {total_added}x")
@@ -730,7 +759,11 @@ class SiliwangiEngine:
     async def execute_order(self):
         """Eksekusi order produksi penuh."""
         self.step_log = []
+        self.substitusi_log = []
         self.reconnect_attempt = 0
+        self.order_id_woo = "UNKNOWN"
+        self._draft_payload_json = None
+        self._draft_total_maxi   = 0
         self._step("🔑", "Memulai", "WAR")
 
         logger.info(f"🔑 [{self.username}] Mengamankan sesi login...")
@@ -743,7 +776,7 @@ class SiliwangiEngine:
         conn = sqlite3.connect(DB_NAME, timeout=10)
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT id, payload_json FROM draft_orders "
+            "SELECT id, payload_json, total_maxi FROM draft_orders "
             "WHERE telegram_id=? AND username=? AND status='PENDING' "
             "ORDER BY id DESC LIMIT 1",
             (self.telegram_id, self.username)
@@ -755,7 +788,10 @@ class SiliwangiEngine:
             logger.error(f"🛑 [{self.username}] Draf KOSONG dari database saat eksekusi!")
             return False
 
-        self.order_id, payload_json = row
+        self.order_id, payload_json, total_maxi_draft = row
+        # Simpan untuk _mark_failed
+        self._draft_payload_json = payload_json
+        self._draft_total_maxi   = total_maxi_draft or 0
         keranjang = json.loads(payload_json)
 
         if not await self._validate_kelipatan(keranjang):
@@ -770,11 +806,13 @@ class SiliwangiEngine:
         dc_items      = [i for i in keranjang if i['kategori'] == 'DC']
         plastik_items = [i for i in keranjang if i['kategori'] == 'PLASTIK']
 
-        # MAXI: smart tier fill (v2.0)
+        # MAXI: smart tier fill (v3.0 — tier-sorted priority queue)
         if maxi_items:
             await self._smart_maxi_fill(maxi_items)
 
-        # ── DC & PLASTIK: Tambah secara PARALEL untuk kecepatan ───────────
+        # ── DC & PLASTIK: Tambah secara PARALEL ────────────────────────
+        # DC: jika habis → catat di log, checkout tetap lanjut
+        # PLASTIK: selalu skip jika gagal, tidak batalkan order
         async def _add_item_task(item, fallback_msg):
             ok, added = await self._add_to_cart(item['id'], item['qty'])
             if ok:
@@ -784,24 +822,33 @@ class SiliwangiEngine:
 
         tasks = []
         for item in dc_items:
-            tasks.append(_add_item_task(item, "DC HABIS (no fallback)"))
+            tasks.append(_add_item_task(item, "DC HABIS — dilewati"))
         for item in plastik_items:
-            tasks.append(_add_item_task(item, "Plastik SKIP (Tier 0)"))
-        
+            tasks.append(_add_item_task(item, "Plastik HABIS — dilewati"))
+
         if tasks:
             await asyncio.gather(*tasks)
 
         if not await self.get_checkout_nonce():
             self._step("❌", "Checkout Nonce", "Tidak ditemukan")
+            self._mark_failed("Gagal ambil checkout nonce")
             return False
-        self._step("🔐", "Checkout Nonce", f"{self.checkout_nonce[:8]}..." if self.checkout_nonce else "N/A")
+        self._step("🔐", "Checkout Nonce",
+                   f"{self.checkout_nonce[:8]}..." if self.checkout_nonce else "N/A")
         self._step(
             "🔐" if self.security_nonce else "⚠️",
             "Security Nonce",
-            f"{self.security_nonce[:8]}..." if self.security_nonce else "Tidak ditemukan (update_order_review dilewati)"
+            f"{self.security_nonce[:8]}..." if self.security_nonce
+            else "Tidak ditemukan (update_order_review dilewati)"
         )
 
-        return await self._process_checkout()
+        result = await self._process_checkout()
+        if not result:
+            # Ambil alasan dari step_log terakhir yang error
+            err_lines = [l for l in self.step_log if any(c in l for c in ["❌", "⚠️"])]
+            reason = err_lines[-1][:120] if err_lines else "Checkout gagal"
+            self._mark_failed(reason)
+        return result
 
     # ------------------------------------------------------------------
     # PROSES CHECKOUT
@@ -916,7 +963,8 @@ class SiliwangiEngine:
                     self.order_id_woo = m.group(1) if m else "UNKNOWN"
                     logger.info(f"🔖 [{self.username}] Order ID diekstrak: {self.order_id_woo}")
                     try:
-                        self._mark_success()
+                        nominal = await self._scrape_order_nominal(self.order_id_woo)
+                        self._mark_success(nominal)
                     except Exception as e:
                         logger.warning(f"⚠️ Gagal membersihkan draf setelah sukses: {e}")
                     return True
@@ -934,13 +982,17 @@ class SiliwangiEngine:
                 m = re.search(r'/order-received/(\d+)/', str(final_res.url))
                 self.order_id_woo = m.group(1) if m else "UNKNOWN"
                 logger.warning(f"⚠️ Redirect history: {len(final_res.history)} redirects. Order ID: {self.order_id_woo}")
-                self._mark_success()
+                nominal = await self._scrape_order_nominal(self.order_id_woo)
+                self._mark_success(nominal)
                 return True
 
             # Cek sukses via teks HTML
             if "Pesanan" in final_res.text or "Order Complete" in final_res.text:
                 logger.info(f"🎉 [{self.username}] Checkout BERHASIL via HTML text!")
-                self._mark_success()
+                nominal = await self._scrape_order_nominal(
+                    getattr(self, 'order_id_woo', 'UNKNOWN')
+                )
+                self._mark_success(nominal)
                 return True
 
             logger.error(f"💀 [{self.username}] Checkout GAGAL. Response: {final_res.text[:200]}")
@@ -955,41 +1007,91 @@ class SiliwangiEngine:
     # MARK SUCCESS — hapus draft, simpan ke history
     # ------------------------------------------------------------------
 
-    def _mark_success(self):
+    def _mark_success(self, total_nominal: str = ''):
         """
-        Atomik: INSERT ke order_history + DELETE dari draft_orders dalam 1 transaksi.
+        Atomik: INSERT ke order_history (status=SUKSES) + DELETE dari draft_orders.
         Jika salah satu gagal, keduanya di-rollback agar data konsisten.
         """
         conn = sqlite3.connect(DB_NAME, timeout=10)
         cursor = conn.cursor()
         try:
-            # Ambil data draft
             cursor.execute(
                 "SELECT telegram_id, username, total_maxi, payload_json FROM draft_orders WHERE id=?",
                 (self.order_id,)
             )
             row = cursor.fetchone()
             if row:
-                # INSERT ke riwayat
                 cursor.execute('''
-                    INSERT INTO order_history (telegram_id, username, total_maxi, payload_json, order_id)
-                    VALUES (?, ?, ?, ?, ?)
-                ''', (row[0], row[1], row[2], row[3], getattr(self, 'order_id_woo', 'UNKNOWN')))
-                logger.info(f"📚 [{self.username}] Riwayat order tersimpan.")
+                    INSERT INTO order_history
+                        (telegram_id, username, total_maxi, payload_json,
+                         order_id, status, total_nominal)
+                    VALUES (?, ?, ?, ?, ?, 'SUKSES', ?)
+                ''', (row[0], row[1], row[2], row[3],
+                      getattr(self, 'order_id_woo', 'UNKNOWN'), total_nominal))
+                logger.info(f"📚 [{self.username}] Riwayat SUKSES tersimpan. Nominal: {total_nominal}")
             else:
-                logger.warning(f"⚠️ [{self.username}] Draft ID {self.order_id} tidak ditemukan saat _mark_success!")
+                logger.warning(
+                    f"⚠️ [{self.username}] Draft ID {self.order_id} tidak ditemukan saat _mark_success!"
+                )
 
-            # DELETE draft (tetap hapus meski row tidak ditemukan, untuk keamanan)
             cursor.execute("DELETE FROM draft_orders WHERE id=?", (self.order_id,))
-
-            conn.commit()  # ← Satu commit untuk INSERT + DELETE
+            conn.commit()
             logger.info(f"✅ [{self.username}] Draft dihapus, riwayat tersimpan.")
         except Exception as e:
             conn.rollback()
             logger.error(f"❌ [{self.username}] _mark_success GAGAL, rollback: {e}", exc_info=True)
-            raise  # Re-raise agar caller tahu
+            raise
         finally:
             conn.close()
+
+    def _mark_failed(self, reason: str = 'Checkout gagal'):
+        """
+        Simpan riwayat order GAGAL ke order_history.
+        Dipanggil dari execute_order() saat checkout tidak berhasil.
+        """
+        if not self._draft_payload_json:
+            return  # Belum ada draft yang diproses, jangan simpan
+        conn = sqlite3.connect(DB_NAME, timeout=10)
+        cursor = conn.cursor()
+        try:
+            cursor.execute('''
+                INSERT INTO order_history
+                    (telegram_id, username, total_maxi, payload_json,
+                     order_id, status, total_nominal)
+                VALUES (?, ?, ?, ?, 'N/A', 'GAGAL', ?)
+            ''', (self.telegram_id, self.username, self._draft_total_maxi,
+                  self._draft_payload_json, reason[:120]))
+            conn.commit()
+            logger.info(f"📚 [{self.username}] Riwayat GAGAL tersimpan: {reason[:60]}")
+        except Exception as e:
+            logger.error(f"❌ [{self.username}] _mark_failed error: {e}")
+        finally:
+            conn.close()
+
+    async def _scrape_order_nominal(self, order_id_woo: str) -> str:
+        """Scrape total nominal dari halaman order-received setelah checkout sukses."""
+        try:
+            url = f"https://siliwangibolukukus.com/checkout/order-received/{order_id_woo}/"
+            res = await self._safe_request('GET', url)
+            if not res:
+                return ''
+            soup = BeautifulSoup(res.text, 'html.parser')
+            # Cari total di overview WooCommerce
+            total_el = soup.find(class_='woocommerce-order-overview__total')
+            if total_el:
+                amount = total_el.find(class_='woocommerce-Price-amount')
+                if amount:
+                    return amount.get_text(strip=True)
+            # Fallback: cari di tabel order
+            total_row = soup.find('tr', class_='order-total')
+            if total_row:
+                amount = total_row.find(class_='woocommerce-Price-amount')
+                if amount:
+                    return amount.get_text(strip=True)
+            return ''
+        except Exception as e:
+            logger.warning(f"[{self.username}] Gagal scrape nominal: {e}")
+            return ''
 
     # ------------------------------------------------------------------
     # CLOSE HTTP CLIENT
