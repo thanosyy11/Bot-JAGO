@@ -1,5 +1,5 @@
 # Bot JAGO 🤖
-Bot Telegram untuk memenangkan **war stok** di toko berbasis **WooCommerce** secara otomatis.
+Bot Telegram untuk memenangkan **WAR** di toko berbasis **WooCommerce** secara otomatis.
 
 ---
 
@@ -11,8 +11,6 @@ Bot Telegram untuk memenangkan **war stok** di toko berbasis **WooCommerce** sec
 | 🔐 Multi-Akun | Kelola banyak akun dari satu bot |
 | 🔄 Smart Fallback | Produk habis? Bot otomatis cari varian tier terdekat |
 | 🔒 Password Aman | Enkripsi Fernet — tidak ada password tersimpan plaintext |
-| 📅 Jadwal Lengkap | Warm-up 07:55, War 08:00, Cleanup 09:00 — fully automated |
-| 🧪 Dry Run Mode | Simulasi penuh tanpa eksekusi checkout — laporan tiap langkah via Telegram |
 | 🚨 Alert Darurat | Notifikasi Telegram langsung jika bot crash saat war |
 | 📊 Riwayat Order | Histori 3 pesanan terakhir per akun |
 
@@ -61,20 +59,12 @@ python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().
 
 > ⚠️ **Penting:** `ENCRYPTION_KEY` harus **sama persis** antara mesin lokal dan LXC jika kamu memindahkan database. Beda key = password tidak bisa terbaca.
 
-### 3. Dry Run (Pengujian Pertama)
-
-Sebelum war sesungguhnya, aktifkan dry run untuk memvalidasi seluruh alur tanpa checkout:
-```env
-DRY_RUN=true
-```
-Bot akan berjalan penuh jam 08:00 dan mengirim laporan detail tiap langkah ke Telegram. Jika semua ✅, ganti ke `DRY_RUN=false` untuk war berikutnya.
-
-### 4. Inisialisasi Database
+### 3. Inisialisasi Database
 ```bash
 python database.py
 ```
 
-### 5. Jalankan Bot
+### 4. Jalankan Bot
 ```bash
 python bot.py
 ```
@@ -100,7 +90,7 @@ sudo systemctl status bot-jago
 ## Update dari GitHub
 
 ```bash
-cd /opt/Bot-JAGO
+cd
 git pull
 source .emyu/bin/activate
 pip install -r requirements.txt

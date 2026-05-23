@@ -158,6 +158,14 @@ def init_db():
         )
     ''')
 
+    # Tabel settings (Global)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    ''')
+
     # Migrasi kolom yang mungkin belum ada di DB lama
     add_column_if_missing("users",         "is_active",   "INTEGER DEFAULT 0")
     add_column_if_missing("users",         "nickname",    "TEXT DEFAULT NULL")
@@ -618,6 +626,28 @@ def get_order_history(telegram_id, username):
     rows = cursor.fetchall()
     conn.close()
     return rows
+
+# ============================================================
+# GLOBAL SETTINGS
+# ============================================================
+
+def get_setting(key: str, default_value: str = "") -> str:
+    conn = sqlite3.connect(DB_NAME, timeout=10)
+    cursor = conn.cursor()
+    cursor.execute("SELECT value FROM settings WHERE key=?", (key,))
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else default_value
+
+def set_setting(key: str, value: str):
+    conn = sqlite3.connect(DB_NAME, timeout=10)
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO settings (key, value) VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value=?
+    ''', (key, value, value))
+    conn.commit()
+    conn.close()
 
 
 if __name__ == "__main__":

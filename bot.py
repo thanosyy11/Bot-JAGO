@@ -4,7 +4,7 @@ import json
 import logging
 import random
 import pytz
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.filters import CommandStart, Command
@@ -22,7 +22,8 @@ from database import (
     get_all_accounts_with_status, count_accounts, clear_session_cookies,
     get_all_drafts_overview, get_session_status,
     set_engine_ready_status, get_engine_ready_status,
-    get_account_nickname, update_account_nickname, delete_account
+    get_account_nickname, update_account_nickname, delete_account,
+    get_setting, set_setting
 )
 from engine import SiliwangiEngine, CloudflareBlockException
 
@@ -56,6 +57,9 @@ class OrderState(StatesGroup):
 
 class EditAkunState(StatesGroup):
     waiting_for_nickname = State()
+
+class KodeAksesState(StatesGroup):
+    waiting_for_kode = State()
 
 
 def _dn(username: str, nickname: str) -> str:
@@ -162,9 +166,10 @@ async def job_eksekusi():
             mesin_siaga[ADMIN_ID] = {}
             for order in orders:
                 username = order[1]
-                if get_engine_ready_status(str(ADMIN_ID), username):
-                    engine = SiliwangiEngine(telegram_id=str(ADMIN_ID), username=username)
-                    mesin_siaga[ADMIN_ID][username] = engine
+                # Fallback: TETAP siapkan engine meskipun status_ready False
+                # Karena execute_order akan mencoba login() jika sesi mati
+                engine = SiliwangiEngine(telegram_id=str(ADMIN_ID), username=username)
+                mesin_siaga[ADMIN_ID][username] = engine
             pasukan = mesin_siaga.get(ADMIN_ID, {})
             
         if not pasukan:
@@ -172,9 +177,45 @@ async def job_eksekusi():
             await bot.send_message(ADMIN_ID, "🚨 **[DARURAT]** Memori kosong & pemulihan DB gagal. WAR dibatalkan!")
             return
 
-    logger.info(f"🚀 MEMULAI WAR {len(pasukan)} AKUN!")
-
     try:
+        import httpx
+        # Cek apakah butuh Gedor Pintu
+        butuh_gedor = True
+        if get_setting("kode_akses", ""):
+            butuh_gedor = False
+        else:
+            # Cek apakah ada engine yang ready (berarti tembus via cookie 06:00)
+            for u in pasukan.keys():
+                if get_engine_ready_status(str(ADMIN_ID), u):
+                    butuh_gedor = False
+                    break
+
+        if butuh_gedor:
+            logger.info("Tidak ada kode & tidak ada cookie tembus. Memulai mode GEDOR PINTU...")
+            timeout_end = datetime.now() + timedelta(minutes=2)
+            async with httpx.AsyncClient(timeout=3.0) as c:
+                while datetime.now() < timeout_end:
+                    try:
+                        r = await c.get("https://siliwangibolukukus.com/")
+                        if "password-protected=login" not in str(r.url) and "password-protected-login" not in r.text:
+                            logger.info("TERBUKA! SERANGG!!!")
+                            break
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0.5)
+            if datetime.now() >= timeout_end:
+                logger.warning("Timeout Gedor Pintu. Mencoba eksekusi secara paksa...")
+        else:
+            # Punya kode atau cookie tembus, tunggu tepat jam 08:00:00 jika dijalankan jam 07:59:50
+            now = datetime.now()
+            target = now.replace(hour=8, minute=0, second=0, microsecond=0)
+            if now < target:
+                wait_sec = (target - now).total_seconds()
+                logger.info(f"⏳ Menunggu {wait_sec:.1f} detik menuju pukul 08:00:00")
+                await asyncio.sleep(wait_sec)
+
+        logger.info(f"🚀 MEMULAI WAR {len(pasukan)} AKUN!")
+
         tasks = []
         delay_total = 0.0
         for username, engine in pasukan.items():
@@ -186,7 +227,7 @@ async def job_eksekusi():
         # ─── Susun Laporan WAR ────────────────────────────────────────
         zona_wib = pytz.timezone('Asia/Jakarta')
         jam_war  = datetime.now(zona_wib).strftime("%H:%M")
-        laporan  = f"📊 **HASIL WAR {jam_war} WIB:**\n\n"
+        laporan  = f" -**HASIL WAR {jam_war} WIB:**\n\n"
 
         for target_username, is_success, step_log, order_id_woo, substitusi_log in hasil_perang:
             if is_success:
@@ -356,8 +397,9 @@ async def job_health_check():
 # JADWAL UTAMA
 # ============================================================
 scheduler.add_job(job_health_check,    'cron', hour=7,  minute=0,  second=0)
+scheduler.add_job(job_pemanasan,       'cron', hour=6,  minute=0,  second=0)
 scheduler.add_job(job_pemanasan,       'cron', hour=7,  minute=55, second=0)
-scheduler.add_job(job_eksekusi,        'cron', hour=8,  minute=0,  second=0)
+scheduler.add_job(job_eksekusi,        'cron', hour=7,  minute=59, second=50)
 scheduler.add_job(job_bersihkan_draft, 'cron', hour=9,  minute=0,  second=0)
 
 def get_main_menu_keyboard() -> InlineKeyboardMarkup:
@@ -374,9 +416,6 @@ async def cmd_help(message: Message):
         "1. **Kelola Akun:** Tambah & login akun Siliwangi.\n"
         "2. **Susun Pesanan:** Input draf item yang akan di-war.\n"
         "3. **Siapkan War:** Cek sesi login & kesiapan draf.\n\n"
-        "⏰ **Jadwal Otomatis:**\n"
-        "• `07:55` → Warm-up (Auto Login)\n"
-        "• `08:00` → Eksekusi War\n\n"
         "💡 _Gunakan menu di bawah untuk navigasi._"
     )
     await message.answer(teks, reply_markup=get_main_menu_keyboard(), parse_mode="Markdown")
@@ -582,9 +621,55 @@ async def cb_menu_pengaturan(callback: CallbackQuery):
     )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👥 Akun Siliwangi", callback_data="menu_akun")],
+        [InlineKeyboardButton(text="🔑 Set Kode Akses War", callback_data="menu_kode_akses")],
         [InlineKeyboardButton(text="🏠 Kembali ke Menu Utama", callback_data="kembali_ke_menu")],
     ])
     await callback.message.edit_text(teks, reply_markup=keyboard, parse_mode="Markdown")
+
+@router.callback_query(F.data == "menu_kode_akses")
+async def cb_menu_kode_akses(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    current_code = get_setting("kode_akses", "")
+    txt_code = f"`{current_code}`" if current_code else "_(belum diatur)_"
+    teks = (
+        "🔑 *KODE AKSES WAR*\n"
+        "━━━━━━━━━━━━━━\n"
+        f"Kode saat ini: {txt_code}\n\n"
+        "Jika Siliwangi mengaktifkan halaman Password, bot membutuhkan kode ini untuk menembusnya secara otomatis.\n\n"
+        "Ketik kode akses baru sekarang:\n"
+        "_(Ketik /batal untuk membatalkan)_"
+    )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 Kembali", callback_data="menu_pengaturan")]
+    ])
+    await callback.message.edit_text(teks, reply_markup=keyboard, parse_mode="Markdown")
+    await state.set_state(KodeAksesState.waiting_for_kode)
+
+@router.message(KodeAksesState.waiting_for_kode)
+async def process_kode_akses(message: Message, state: FSMContext):
+    if message.text.startswith('/'):
+        await message.answer("Silakan ketik kode akses (tanpa awalan `/`):")
+        return
+    kode = message.text.strip()
+    set_setting("kode_akses", kode)
+    await state.clear()
+    
+    teks = (
+        f"✅ *Kode Akses Berhasil Disimpan!*\n\n"
+        f"Kode baru: `{kode}`\n\n"
+        f"Jika jam 07:55 gagal login karena password, Anda bisa mengklik tombol di bawah ini untuk Login Ulang secara manual."
+    )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Coba Login Ulang Sekarang", callback_data="force_warmup")],
+        [InlineKeyboardButton(text="🔙 Pengaturan", callback_data="menu_pengaturan")]
+    ])
+    await message.answer(teks, reply_markup=keyboard, parse_mode="Markdown")
+
+@router.callback_query(F.data == "force_warmup")
+async def cb_force_warmup(callback: CallbackQuery):
+    await callback.answer("Memulai ulang proses Warm-Up...")
+    await job_pemanasan()
+
 
 
 @router.callback_query(F.data == "war_panel")
@@ -1105,14 +1190,16 @@ async def cb_start_input_order(callback: CallbackQuery, state: FSMContext):
         "- 6x MAXI Susu Lembang\n"
         "- 2x MAXI Alpukat Mentega\n"
         "- 2x MAXI Talas Bogor\n"
+        "- 2x MAXI Black Pink\n"
         "- 8x MAXI Pandan Wangi\n"
         "- 8x MAXI Red Velvet\n"
         "- 1x MAXI Keju Cheddar\n"
         "- 3x MAXI Durian Musang King\n"
+        "- 3x MAXI Durian Montong\n"
         "- 1x MAXI Mangga Indramayu\n"
         "- 2x MAXI Original Lapis\n"
-        "- 0x DC Belgian Chocolate\n"
-        "- 0x DC Black Forest\n"
+        "- 2x DC Belgian Chocolate\n"
+        "- 2x DC Black Forest\n"
         "- 50x Plastik Bolu Klasik HD Isi 3 Box\n"
         "- 50x Plastik Bakpia Kukus HD Isi 3 Box\n\n"
         "_Salin teks di atas, edit angka, lalu kirim._\n"

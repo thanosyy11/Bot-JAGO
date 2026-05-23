@@ -15,6 +15,7 @@ from database import (
     load_session_cookies,
     save_session_cookies,
     clear_session_cookies,
+    get_setting
 )
 
 logging.basicConfig(
@@ -181,6 +182,45 @@ class SiliwangiEngine:
         return False
 
     # ------------------------------------------------------------------
+    # PASSWORD PROTECTED BYPASS
+    # ------------------------------------------------------------------
+
+    async def bypass_site_password(self):
+        """
+        Mengecek apakah situs diproteksi oleh plugin 'Password Protected'.
+        Jika ya, otomatis menembus dengan menggunakan password global dari DB.
+        """
+        global_pwd = get_setting("kode_akses", "")
+        if not global_pwd:
+            return  # Jika belum diset, abaikan saja
+
+        try:
+            res = await self._safe_request('GET', "https://siliwangibolukukus.com/")
+            if not res:
+                return
+
+            # Cek apakah ada redirect ke password-protected atau form password
+            if "password-protected=login" in str(res.url) or "password-protected-login" in res.text:
+                logger.info(f"🛡️ [{self.username}] Terdeteksi Halaman Password! Mencoba bypass...")
+                
+                # Plugin biasanya menggunakan POST ke URL yang sama atau login action
+                payload = {
+                    "password_protected_pwd": global_pwd,
+                    "wp_submit": "Log In"
+                }
+                
+                # Kirim request POST form password
+                bypass_url = "https://siliwangibolukukus.com/wp-login.php?action=password-protected-login"
+                res_bypass = await self._safe_request('POST', bypass_url, data=payload)
+                
+                if res_bypass and "password-protected=login" not in str(res_bypass.url):
+                    logger.info(f"✅ [{self.username}] Bypass Password BERHASIL!")
+                else:
+                    logger.warning(f"⚠️ [{self.username}] Bypass Password GAGAL! Kode mungkin salah.")
+        except Exception as e:
+            logger.error(f"Error saat bypass password: {e}")
+
+    # ------------------------------------------------------------------
     # SESSION MANAGEMENT
     # ------------------------------------------------------------------
 
@@ -250,6 +290,9 @@ class SiliwangiEngine:
     # ------------------------------------------------------------------
 
     async def login(self):
+        # Panggil bypass password sebelum login
+        await self.bypass_site_password()
+
         if not self._get_credentials():
             logger.error(f"Kredensial tidak ditemukan untuk: {self.username}")
             return False
@@ -386,7 +429,7 @@ class SiliwangiEngine:
                 return False, 0
 
             try:
-                data = res.json()
+                data = self._parse_json_response(res.text)
             except ValueError:
                 logger.error(f"❌ [{self.username}] Respons add_to_cart bukan JSON. Kemungkinan redirect.")
                 return False, 0
@@ -409,7 +452,7 @@ class SiliwangiEngine:
                         })
                         if res2:
                             try:
-                                d2 = res2.json()
+                                d2 = self._parse_json_response(res2.text)
                                 if 'fragments' in d2 or 'cart_hash' in d2:
                                     return True, available  # Sukses parsial
                             except Exception:
@@ -478,24 +521,25 @@ class SiliwangiEngine:
 
     async def _smart_maxi_fill(self, maxi_items: list) -> int:
         """
-        Mengisi keranjang MAXI dengan cerdas.
-
-        Logika Tier (BENAR):
-        - Priority queue diurutkan Tier 1 → Tier 2 → Tier 3 (bukan urutan input user)
-        - Dalam tier yang sama, item yang di-request user diutamakan
-        - Jika Tier 2 habis → bot coba Tier 1 dulu (fallback), lalu Tier 2 lain
-        - Tier 3 cut 40%: berlaku setiap pertama kali bot masuk Tier 3
-          (bukan hanya jika Tier 1+2 = 0), hasil harus kelipatan 12
+        Mengisi keranjang MAXI dengan cerdas (Stable Version + Logging):
+        - Priority queue: User item diutamakan, lalu sisa DB sebagai fallback.
+        - Partial fill: amankan stok sisa, lanjut ke produk berikutnya
+        - Tier chain: Tier 1 -> Tier 2 -> Tier 3
+        - Tier 3 only cut: jika hanya Tier 3 tersedia, potong 40%
 
         Return: total qty MAXI yang berhasil masuk keranjang
         """
         total_needed = sum(item['qty'] for item in maxi_items)
         remaining    = total_needed
         total_added  = 0
-        tiers_contributed = set()
+        tiers_contributed = set()   # Tier mana saja yang berhasil masuk
         tier3_cut_applied = False
 
-        # ── Ambil semua produk MAXI dari DB ─────────────────────────────
+        # ── Bangun priority queue ───────────────────────────────────
+        # 1. Item yang diminta user (urutan asli input)
+        # 2. Produk MAXI lain dari DB (belum di-request, sebagai fallback)
+        user_ids = {item['id'] for item in maxi_items}
+
         conn = sqlite3.connect(DB_NAME, timeout=10)
         cursor = conn.cursor()
         cursor.execute('''
@@ -506,40 +550,29 @@ class SiliwangiEngine:
         all_maxi_db = {row[0]: row for row in cursor.fetchall()}
         conn.close()
 
-        # ── Bangun priority queue: TIER ASC, user items dulu dalam tier-nya ──
-        # Mulai dari DB items sebagai base (fallback)
-        merged = {}
-        for pid, (p_id, pnama, ptier) in all_maxi_db.items():
-            merged[p_id] = {
-                'id': p_id, 'nama': pnama, 'qty': 0,
-                'tier': ptier, 'kategori': 'MAXI', '_fallback': True
-            }
-        # Override dengan user items (simpan qty asli, tandai bukan fallback)
-        for item in maxi_items:
-            merged[item['id']] = {**item, '_fallback': False}
+        # Priority queue: user's items first, then DB fallbacks
+        priority_queue = list(maxi_items)  # dicts dengan 'id','nama','qty','tier'
+        for prod_id, (pid, pnama, ptier) in all_maxi_db.items():
+            if prod_id not in user_ids:
+                priority_queue.append({'id': pid, 'nama': pnama,
+                                       'qty': 0, 'tier': ptier,
+                                       'kategori': 'MAXI', '_fallback': True})
 
-        # Sort: Tier 1 dulu, lalu Tier 2, lalu Tier 3.
-        # Dalam tier yang sama: user items (not fallback) diproses lebih dulu.
-        priority_queue = sorted(
-            merged.values(),
-            key=lambda x: (x['tier'], 1 if x.get('_fallback') else 0)
-        )
-
-        # ── Proses setiap produk dalam antrian ───────────────────────────
+        # ── Proses setiap produk dalam antrian ───────────────────────
         for product in priority_queue:
             if remaining <= 0:
                 break
 
             tier = product.get('tier', 1)
 
-            # Tier 3 cut — berlaku PERTAMA KALI bot masuk Tier 3
-            if tier == 3 and not tier3_cut_applied:
+            # Tier 3 cut — hanya 1x, hanya jika Tier 1 & 2 tidak berkontribusi
+            if (tier == 3
+                    and not tier3_cut_applied
+                    and tiers_contributed.isdisjoint({1, 2})):
                 cut = max(12, (int(remaining * 0.60) // 12) * 12)
-                logger.info(
-                    f"✂️ [{self.username}] Masuk Tier 3 — potong 40%: {remaining}x → {cut}x"
-                )
-                self._step("✂️", "Potong 40% (Tier 3)",
-                           f"{remaining}x → {cut}x (kelipatan 12)")
+                logger.info(f"✂️ [{self.username}] Tier 3 only — potong 40%: {remaining}x → {cut}x")
+                self._step("✂️", "Tier 3 Only",
+                           f"Semua T1+T2 habis. Target dipotong 40%: {remaining}→{cut}x")
                 remaining = cut
                 tier3_cut_applied = True
 
@@ -559,23 +592,15 @@ class SiliwangiEngine:
                     self._step("⚡", f"{product['nama']}",
                                f"Parsial {added}/{qty_to_try}x (sisa {remaining}x)")
                     if not product.get('_fallback'):  # Stok parsial dari item user request
-                        self.substitusi_log.append(
-                            f"⚡ {product['nama']}: stok parsial {added}/{qty_to_try}x"
-                        )
+                        self.substitusi_log.append(f"⚡ {product['nama']}: stok parsial {added}/{qty_to_try}x")
                 else:
                     self._step("🛒", f"{added}x {product['nama']}", "Masuk")
-                    # Jika ini fallback (bukan request asli user) → catat sebagai substitusi
                     if product.get('_fallback') and tier <= 2:
-                        self.substitusi_log.append(
-                            f"🔄 Substitusi: +{added}x {product['nama']} (Tier {tier})"
-                        )
+                        self.substitusi_log.append(f"🔄 Substitusi: +{added}x {product['nama']} (Tier {tier})")
             else:
                 self._step("⚠️", f"{product['nama']}", "Habis / Gagal")
-                # Catat varian habis — hanya item yang diminta user (bukan fallback)
                 if not product.get('_fallback'):
-                    self.substitusi_log.append(
-                        f"❌ {product['nama']} (Tier {tier}): HABIS"
-                    )
+                    self.substitusi_log.append(f"❌ {product['nama']} (Tier {tier}): HABIS")
 
         if remaining > 0:
             logger.warning(
@@ -956,7 +981,7 @@ class SiliwangiEngine:
 
             # Cek sukses via JSON terlebih dahulu
             try:
-                result = final_res.json()
+                result = self._parse_json_response(final_res.text)
                 if result.get('result') == 'success':
                     logger.info(f"🎉 [{self.username}] Checkout BERHASIL via JSON response!")
                     redirect_url = result.get('redirect', '')
