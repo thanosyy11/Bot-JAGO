@@ -131,6 +131,30 @@ class SiliwangiEngine:
                 return None
         return None
 
+    def _parse_json_response(self, text: str) -> dict:
+        """Parse JSON response, ignoring extra non-JSON prefix jika ada (seperti $adaPromo)."""
+        import json
+        text = text.strip()
+        if not text:
+            return {}
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            # Seringkali Siliwangi me-return "$adaPromo{"result":...}"
+            if text.startswith("$adaPromo"):
+                text = text[len("$adaPromo"):]
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                # Fallback ekstrim: cari kurung kurawal pertama
+                start_idx = text.find('{')
+                if start_idx != -1:
+                    try:
+                        return json.loads(text[start_idx:])
+                    except:
+                        pass
+        return {}
+
     async def _safe_request_with_recovery(self, method, url, max_retries=4, **kwargs):
         """
         Wrapper untuk _safe_request() dengan auto-reconnect logic.

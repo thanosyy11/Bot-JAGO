@@ -82,10 +82,7 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
-    # ── Tabel produk ──────────────────────────────────────────────────────────
-    # DROP + RECREATE setiap startup untuk membersihkan duplikat historis
-    # dan memastikan ID produk selalu sinkron dengan list di bawah.
-    # Produk TIDAK disimpan user — selalu dari hardcoded list ini.
+    # ── Tabel produk
     cursor.execute("DROP TABLE IF EXISTS products")
     cursor.execute('''
         CREATE TABLE products (
@@ -196,7 +193,7 @@ def init_db():
         (58972,  "MAXI Durian Montong",          "MAXI", 3),
         (315,    "MAXI Mangga Indramayu",        "MAXI", 3),
         (219722, "MAXI Original Lapis",          "MAXI", 3),
-        # === Dessert Cake (DC) — Simple Products ===
+        # === Dessert Cake (DC)
         (206125, "DC Belgian Chocolate",         "DC",   1),
         (54383,  "DC Black Forest",              "DC",   1),
         (54386,  "DC Red Velvet",                "DC",   1),
@@ -651,4 +648,4 @@ def set_setting(key: str, value: str):
 
 
 if __name__ == "__main__":
-    init_db()
+    init_db()
