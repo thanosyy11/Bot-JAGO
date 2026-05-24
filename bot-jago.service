@@ -1,5 +1,5 @@
 [Unit]
-Description=Bot JAGO — Siliwangi War Bot
+Description=Bot JAGO
 Documentation=https://github.com/thanosyy11/Bot-JAGO
 After=network-online.target
 Wants=network-online.target

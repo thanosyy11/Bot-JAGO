@@ -70,7 +70,7 @@ def _dn(username: str, nickname: str) -> str:
 def get_war_panel_button() -> InlineKeyboardMarkup:
     """Tombol CTA standar yang ditempel di setiap notifikasi otomatis."""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Buka Panel War", callback_data="war_panel")]
+        [InlineKeyboardButton(text="📊 Dashboard", callback_data="war_panel")]
     ])
 
 mesin_siaga = {} 
@@ -90,13 +90,13 @@ async def eksekusi_dengan_jeda(engine, delay, username):
     )
 
 async def job_pemanasan():
-    logger.info("Warm Up (07:55)...")
+    logger.info("Warm Up...")
     orders = get_all_pending_orders_multi(str(ADMIN_ID))
 
     if not orders:
         await bot.send_message(
             ADMIN_ID,
-            "🏖️ Tidak ada draf pesanan hari ini. Bot tidak aktif.",
+            "Tidak ada draf pesanan hari ini. Bot tidak aktif.",
             reply_markup=get_war_panel_button()
         )
         logger.info("[Libur] Tidak ada draf pesanan.")
@@ -106,9 +106,9 @@ async def job_pemanasan():
     draf_info = "\n".join([f"  · `{o[1]}`" for o in orders])
     await bot.send_message(
         ADMIN_ID,
-        f"⚙️ **[07:55] WARM-UP DIMULAI**\n\n"
+        f"⚙️ **WARM-UP DIMULAI**\n\n"
         f"Ditemukan **{len(orders)} draf** pesanan:\n{draf_info}\n\n"
-        f"_Memulai login semua akun..._",
+        f"_Memulai login..._",
         parse_mode="Markdown",
         reply_markup=get_war_panel_button()
     )
@@ -144,7 +144,7 @@ async def job_pemanasan():
         status_txt = f"✅ Login berhasil: **{berhasil_login}/{len(orders)} akun**"
         if gagal_login:
             status_txt += f"\n❌ Gagal login: " + ", ".join([f"`{u}`" for u in gagal_login])
-        status_txt += "\n\n⏳ _Siap eksekusi jam 08:00 WIB._"
+        status_txt += "\n\n⏳ _Siap eksekusi!!!_"
         await bot.send_message(ADMIN_ID, status_txt, parse_mode="Markdown", reply_markup=get_war_panel_button())
     else:
         await bot.send_message(
@@ -156,11 +156,11 @@ async def job_pemanasan():
 
 
 async def job_eksekusi():
-    logger.info("Mengecek jadwal (08:00)...")
+    logger.info("Mengecek jadwal...")
     pasukan = mesin_siaga.get(ADMIN_ID, {})
 
     if not pasukan:
-        logger.warning("⚠️ Memori mesin_siaga kosong, memuat fallback dari database...")
+        logger.warning("⚠️ Memori kosong, memuat fallback dari database...")
         orders = get_all_pending_orders_multi(str(ADMIN_ID))
         if orders:
             mesin_siaga[ADMIN_ID] = {}
@@ -204,7 +204,7 @@ async def job_eksekusi():
                         pass
                     await asyncio.sleep(0.5)
             if datetime.now() >= timeout_end:
-                logger.warning("Timeout Gedor Pintu. Mencoba eksekusi secara paksa...")
+                logger.warning("Timeout Gedor Pintu. Mencoba eksekusi paksa...")
         else:
             # Punya kode atau cookie tembus, tunggu tepat jam 08:00:00 jika dijalankan jam 07:59:50
             now = datetime.now()
@@ -214,7 +214,7 @@ async def job_eksekusi():
                 logger.info(f"⏳ Menunggu {wait_sec:.1f} detik menuju pukul 08:00:00")
                 await asyncio.sleep(wait_sec)
 
-        logger.info(f"🚀 MEMULAI WAR {len(pasukan)} AKUN!")
+        logger.info(f"MEMULAI WAR {len(pasukan)} AKUN!")
 
         tasks = []
         delay_total = 0.0
@@ -263,7 +263,7 @@ async def job_eksekusi():
 
         mesin_siaga.pop(ADMIN_ID, None)
         war_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📊 Panel War", callback_data="war_panel"),
+            [InlineKeyboardButton(text="📊 Dashboard", callback_data="war_panel"),
              InlineKeyboardButton(text="📜 Riwayat", callback_data="lihat_riwayat")]
         ])
         try:
@@ -281,7 +281,7 @@ async def job_eksekusi():
         logger.info("War Selesai.")
 
     except CloudflareBlockException as e:
-        pesan_error = "🚨 **[CLOUDFLARE BLOCK]** Bot terdeteksi oleh Cloudflare dan tidak dapat memproses request! Mohon periksa IP atau jaringan."
+        pesan_error = "Bot terdeteksi oleh Cloudflare dan tidak dapat memproses request! Mohon periksa IP atau jaringan."
         logger.error(f"CLOUDFLARE ERROR saat job_eksekusi: {e}")
         try:
             await bot.send_message(ADMIN_ID, pesan_error, parse_mode="Markdown")
@@ -320,18 +320,18 @@ async def job_bersihkan_draft():
     Membersihkan semua draft PENDING yang tersisa setelah war selesai,
     agar tidak terbawa ke war berikutnya.
     """
-    logger.info("🧹 [09:00] Memulai cleanup draft otomatis...")
+    logger.info("Memulai cleanup draft otomatis...")
     deleted = cleanup_all_pending_orders(str(ADMIN_ID))
     mesin_siaga.pop(ADMIN_ID, None)  # Bersihkan juga cache engine
 
     if deleted > 0:
         pesan = (
-            f"🧹 **[CLEANUP 09:00]** Selesai!\n"
+            f"🧹 CLEANUP Selesai!\n"
             f"Dihapus **{deleted}** draft PENDING yang tersisa."
         )
         logger.info(f"🧹 Cleanup: {deleted} draft dihapus.")
     else:
-        pesan = "🧹 **[CLEANUP 09:00]** Tidak ada draft tersisa. Bersih! ✨"
+        pesan = "🧹 CLEANUP Bersih! ✨"
         logger.info("🧹 Cleanup: Tidak ada draft tersisa.")
 
     try:
@@ -350,7 +350,7 @@ async def job_health_check():
     Laporkan hasilnya ke admin.
     """
     import httpx as _httpx
-    logger.info("[07:00] Health check dimulai...")
+    logger.info("Health check dimulai...")
 
     # 1. Cek website
     website_ok = False
@@ -359,7 +359,7 @@ async def job_health_check():
             resp = await client.get("https://siliwangibolukukus.com/")
             website_ok = resp.status_code < 500
     except Exception as e:
-        logger.warning(f"Health check website gagal: {e}")
+        logger.warning(f"Health check Gagal: {e}")
 
     # 2. Cek session setiap akun yang punya draf
     orders = get_all_pending_orders_multi(str(ADMIN_ID))
@@ -383,10 +383,9 @@ async def job_health_check():
     sesi_status = "\n".join(session_lines) if session_lines else "  _(tidak ada draf aktif)_"
 
     pesan = (
-        f"🟡 **[07:00] HEALTH CHECK**\n\n"
+        f"HEALTH CHECK\n\n"
         f"**Website:** {web_status}\n\n"
         f"**Session Akun:**\n{sesi_status}\n\n"
-        f"_War dimulai jam 08:00 WIB._"
     )
     try:
         await bot.send_message(ADMIN_ID, pesan, parse_mode="Markdown", reply_markup=get_war_panel_button())
@@ -406,7 +405,7 @@ def get_main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⚙️ Pengaturan", callback_data="menu_pengaturan"),
          InlineKeyboardButton(text="📦 Input Pesanan", callback_data="menu_order")],
-        [InlineKeyboardButton(text="🚀 Panel War & Eksekusi", callback_data="war_panel")],
+        [InlineKeyboardButton(text="🚀 Dashboard", callback_data="war_panel")],
     ])
 
 @router.message(Command("help"))
@@ -434,7 +433,7 @@ async def cmd_start(event, state: FSMContext = None):
     drafts = get_all_drafts_overview(user_id)
     current_user = get_current_user(user_id)
 
-    status_text = "🤖 *BOT JAGO — War Dashboard*\n━━━━━━━━━━━━━━\n"
+    status_text = "🤖 *BOT JAGO — Dashboard*\n━━━━━━━━━━━━━━\n"
 
     if not drafts:
         status_text += "❌ Belum ada akun terdaftar.\nKlik ⚙️ *Pengaturan* → *Akun Siliwangi* untuk mulai."
@@ -462,13 +461,13 @@ async def cmd_start(event, state: FSMContext = None):
 TUTORIAL_PAGES = [
     # Halaman 1 — Overview
     (
-        "📖 **TUTORIAL BOT JAGO** — Hal. 1/7\n"
+        " **TUTORIAL BOT JAGO** — Hal. 1/7\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🤖 **Apa itu Bot JAGO?**\n\n"
+        " **Apa itu Bot JAGO?**\n\n"
         "Bot JAGO adalah bot Telegram untuk otomasi order WooCommerce.\n\n"
         "**Fitur utama:**\n"
         "• ⚡ Checkout otomatis tepat jam 08:00 WIB\n"
-        "• 👥 Multi-akun (hingga 2 akun sekaligus)\n"
+        "• 👥 Multi-akun (hingga 10 akun sekaligus)\n"
         "• 🧠 Smart tier: amankan stok parsial & fallback otomatis\n"
         "• 🔑 Session login tersimpan — tidak perlu login ulang\n"
         "• 📊 Laporan hasil langsung ke Telegram\n\n"
@@ -479,9 +478,9 @@ TUTORIAL_PAGES = [
     ),
     # Halaman 2 — Setup awal
     (
-        "📖 **TUTORIAL BOT JAGO** — Hal. 2/7\n"
+        " **TUTORIAL BOT JAGO** — Hal. 2/7\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🔧 **Setup Awal (Lakukan Sekali)**\n\n"
+        " **Setup Awal**\n\n"
         "**Langkah 1 — Tambah Akun:**\n"
         "1. Buka 👥 **Kelola Multi-Akun**\n"
         "2. Klik ➕ **Tambah Akun Baru**\n"
@@ -496,9 +495,9 @@ TUTORIAL_PAGES = [
     ),
     # Halaman 3 — Input Pesanan
     (
-        "📖 **TUTORIAL BOT JAGO** — Hal. 3/7\n"
+        "**TUTORIAL BOT JAGO** — Hal. 3/7\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "📦 **Cara Input Pesanan**\n\n"
+        "**Cara Input Pesanan**\n\n"
         "**Langkah 1 — Pilih Akun Aktif:**\n"
         "• Buka 👥 **Kelola Multi-Akun** → klik nama akun\n"
         "• Akun aktif ditandai `🟢🔑` di menu\n\n"
@@ -514,32 +513,26 @@ TUTORIAL_PAGES = [
     ),
     # Halaman 4 — Aturan Produk
     (
-        "📖 **TUTORIAL BOT JAGO** — Hal. 4/7\n"
+        "**TUTORIAL BOT JAGO** — Hal. 4/7\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "📋 **Aturan Produk & Kelipatan**\n\n"
+        "**Aturan Produk & Kelipatan**\n\n"
         "**MAXI** (wajib kelipatan **12**):\n"
-        "• Tier 1 (utama): Belgian Choco, Black Forest, Dubai Pistachio, Tiramisu, Brownies\n"
-        "• Tier 2 (cadangan): Susu Lembang, Red Velvet, Pandan Wangi, Talas Bogor, Durian MK\n"
-        "• Tier 3 (terakhir): Keju, Alpukat, Black Pink, Durian Montong, Mangga, Original Lapis\n\n"
         "**DC / Dessert Cake** (wajib kelipatan **4**):\n"
-        "• DC Belgian Chocolate, DC Black Forest\n"
-        "• DC tidak bisa menggantikan MAXI, begitu pula sebaliknya\n\n"
-        "**Plastik** (tidak ada fallback):\n"
         "• Jika habis → dilewati otomatis, order tetap lanjut\n\n"
         "**Minimal order: 50 box** (gabungan MAXI + DC)"
     ),
     # Halaman 5 — Smart Tier System
     (
-        "📖 **TUTORIAL BOT JAGO** — Hal. 5/7\n"
+        "**TUTORIAL BOT JAGO** — Hal. 5/7\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🧠 **Smart Tier System (Otomatis)**\n\n"
+        "**Smart Tier System**\n\n"
         "Bot otomatis menangani stok yang habis/kurang:\n\n"
         "**Contoh: Kamu order 120 MAXI**\n"
         "```\n"
         "Skenario A (normal):\n"
         "  ✅ 120x dari Tier 1 → selesai\n\n"
         "Skenario B (stok parsial):\n"
-        "  ⚡ Belgian Choco: hanya 13x tersisa\n"
+        "  ⚡ Belgian Chocolate: hanya 13x tersisa\n"
         "  → Amankan 13x, sisa 107x ke produk berikutnya\n\n"
         "Skenario C (Tier 1+2 habis):\n"
         "  ✂️ Otomatis potong 40%: 120 → 72x\n"
@@ -549,9 +542,9 @@ TUTORIAL_PAGES = [
     ),
     # Halaman 6 — Manajemen Draf
     (
-        "📖 **TUTORIAL BOT JAGO** — Hal. 6/7\n"
+        "**TUTORIAL BOT JAGO** — Hal. 6/7\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "📝 **Manajemen Draf Pesanan**\n\n"
+        "**Manajemen Pesanan**\n\n"
         "Buka 📝 **Pesanan & Kelola** untuk:\n\n"
         "• **Lihat status semua akun** — siap/belum ada draf\n"
         "• **Detail & Edit Draf** — lihat/edit isi pesanan akun aktif\n"
@@ -565,9 +558,9 @@ TUTORIAL_PAGES = [
     ),
     # Halaman 7 — Alur War & Tips
     (
-        "📖 **TUTORIAL BOT JAGO** — Hal. 7/7\n"
+        "**TUTORIAL BOT JAGO** — Hal. 7/7\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "⚔️ **Alur War & Tips Sukses**\n\n"
+        "**Alur War & Tips Sukses**\n\n"
         "**H-1 malam (misal 21:00):**\n"
         "1. Input pesanan untuk semua akun\n"
         "2. Login Semua Sekarang → pastikan semua 🟢🔑\n"
@@ -579,7 +572,6 @@ TUTORIAL_PAGES = [
         "• ✅ Pastikan semua akun punya 🔑 session\n"
         "• ✅ Nama produk harus persis sama dengan template\n"
         "• ✅ Total MAXI kelipatan 12, DC kelipatan 4\n"
-        "• ✅ Server LXC menyala 24/7\n\n"
         "🎯 _Selamat War! Gibran & Jokowi for 2029_ 🇮🇩"
     ),
 ]
@@ -616,12 +608,10 @@ async def cb_menu_pengaturan(callback: CallbackQuery):
     await callback.answer()
     teks = (
         "⚙️ *PENGATURAN*\n"
-        "━━━━━━━━━━━━━━\n"
-        "Kelola akun dan preferensi bot."
     )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👥 Akun Siliwangi", callback_data="menu_akun")],
-        [InlineKeyboardButton(text="🔑 Set Kode Akses War", callback_data="menu_kode_akses")],
+        [InlineKeyboardButton(text="🔑 Set Kode Akses Web", callback_data="menu_kode_akses")],
         [InlineKeyboardButton(text="🏠 Kembali ke Menu Utama", callback_data="kembali_ke_menu")],
     ])
     await callback.message.edit_text(teks, reply_markup=keyboard, parse_mode="Markdown")
@@ -635,7 +625,6 @@ async def cb_menu_kode_akses(callback: CallbackQuery, state: FSMContext):
         "🔑 *KODE AKSES WAR*\n"
         "━━━━━━━━━━━━━━\n"
         f"Kode saat ini: {txt_code}\n\n"
-        "Jika Siliwangi mengaktifkan halaman Password, bot membutuhkan kode ini untuk menembusnya secara otomatis.\n\n"
         "Ketik kode akses baru sekarang:\n"
         "_(Ketik /batal untuk membatalkan)_"
     )
@@ -693,9 +682,6 @@ async def cb_war_panel(callback: CallbackQuery):
     status_text = "\n".join(status_lines) if status_lines else "❌ Belum ada akun terdaftar."
     teks = (
         "🚀 *PANEL WAR*\n"
-        "━━━━━━━━━━━━━━\n"
-        f"{status_text}\n\n"
-        "⏰ _07:55 Warmup · 08:00 Eksekusi · 09:00 Cleanup_"
     )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⚡ Siapkan Semua Akun", callback_data="siapkan_semua")],
@@ -811,7 +797,7 @@ async def cb_force_relogin(callback: CallbackQuery):
         engine = mesin_siaga[ADMIN_ID].pop(target)
         await engine.close()
     await callback.answer(
-        f"✅ Session {target[:30]} direset.\nBot login ulang otomatis jam 07:55.",
+        f"✅ Session {target[:30]} direset.\nBot login ulang otomatis...",
         show_alert=True
     )
     await cb_acc_detail(callback)
@@ -825,7 +811,6 @@ async def cb_edit_nickname(callback: CallbackQuery, state: FSMContext):
         f"✏️ *Ubah Nama Alias*\n\n"
         f"Akun: `{target}`\n\n"
         f"Ketik nama alias yang mudah diingat.\n"
-        f"Contoh: _Akun Mama_, _Akun Cadangan_\n\n"
         f"_Ketik /batal untuk membatalkan._",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🔙 Batal", callback_data=f"acc_detail:{target}")]
@@ -902,7 +887,7 @@ async def cb_add_new_acc(callback: CallbackQuery, state: FSMContext):
         return
     await callback.message.edit_text(
         f"➕ **Tambah Akun** ({total}/2)\n\n"
-        f"Ketik **Username atau Email** akun WooCommerce:\n\n"
+        f"Ketik **Username atau Email** akun Siliwangi:\n\n"
         f"_Ketik /batal untuk membatalkan._",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🔙 Batal", callback_data="menu_akun")]
@@ -913,11 +898,7 @@ async def cb_add_new_acc(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "siapkan_semua")
 async def cb_siapkan_semua(callback: CallbackQuery):
-    """
-    Siapkan semua akun untuk war: login semua akun yang punya draf pesanan.
-    Ini yang dilakukan bot secara otomatis jam 07:55,
-    tapi bisa dilakukan manual kapan saja untuk memastikan semuanya siap.
-    """
+    
     await callback.answer()
     tid = str(callback.from_user.id)
     orders = get_all_pending_orders_multi(tid)
@@ -925,7 +906,7 @@ async def cb_siapkan_semua(callback: CallbackQuery):
     if not orders:
         await callback.message.edit_text(
             "⚠️ **Belum ada pesanan yang tersimpan.**\n\n"
-            "Masukkan pesanan terlebih dahulu melalui menu 📦 **Input Pesanan**,\n"
+            "Masukkan pesanan melalui menu 📦 **Input Pesanan**,\n"
             "lalu kembali ke sini untuk menyiapkan akun.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔙 Kembali", callback_data="menu_akun")]
@@ -967,12 +948,12 @@ async def cb_siapkan_semua(callback: CallbackQuery):
         baris_hasil += "\n❌ Gagal: " + ", ".join([f"`{u}`" for u in gagal])
         baris_hasil += "\n\n_Cek username & password akun yang gagal._"
     else:
-        baris_hasil += "\n\n_Semua siap. War berjalan otomatis jam 08:00 WIB._"
+        baris_hasil += "\n\n_Semua siap!_"
 
     await callback.message.edit_text(
         baris_hasil,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📊 Kembali ke Panel War", callback_data="war_panel")]
+            [InlineKeyboardButton(text="📊 Dashboard", callback_data="war_panel")]
         ]),
         parse_mode="Markdown"
     )
@@ -1131,7 +1112,7 @@ async def cb_menu_order(callback: CallbackQuery):
     teks = (
         "📦 *INPUT PESANAN*\n"
         "━━━━━━━━━━━━━━\n"
-        "Pilih akun untuk mengelola draf:\n"
+        "Pilih akun:\n"
     )
 
     keyboard = []
@@ -1181,7 +1162,6 @@ async def cb_start_input_order(callback: CallbackQuery, state: FSMContext):
 
     template = (
         f"**Order untuk Akun: `{current_user}`**\n\n"
-        "Salin dan edit:\n\n"
         "- 50x MAXI Belgian Chocolate\n"
         "- 50x MAXI Black Forest\n"
         "- 15x MAXI Cokelat Dubai Pistachio\n"

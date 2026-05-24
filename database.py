@@ -197,7 +197,7 @@ def init_db():
         (206125, "DC Belgian Chocolate",         "DC",   1),
         (54383,  "DC Black Forest",              "DC",   1),
         (54386,  "DC Red Velvet",                "DC",   1),
-        # === Kemasan ===
+        # === Kemasan
         (70867,  "Plastik Bolu Klasik HD Isi 3 Box",   "PLASTIK", 0),
         (137748, "Plastik Bakpia Kukus HD Isi 3 Box",  "PLASTIK", 0),
     ]
