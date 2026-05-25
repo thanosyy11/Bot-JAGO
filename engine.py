@@ -632,8 +632,76 @@ class SiliwangiEngine:
             )
             self._step("⚠️", "MAXI", f"Kurang {remaining}x dari {total_needed}x")
 
+            # Auto-Trim: Jika stok habis dan total keranjang tidak kelipatan 12
+            excess = total_added % 12
+            if excess > 0:
+                trimmed = await self._trim_maxi_cart(excess)
+                total_added -= trimmed
+
         logger.info(f"✅ [{self.username}] Total MAXI masuk keranjang: {total_added}x")
         return total_added
+
+    async def _trim_maxi_cart(self, excess: int) -> int:
+        """
+        Auto-Trim: Membuang 'excess' jumlah MAXI dari keranjang untuk 
+        menggenapkan ke kelipatan 12 terdekat.
+        Sangat aman: jika gagal, tidak merusak alur (hanya log error).
+        """
+        if excess <= 0:
+            return 0
+            
+        logger.warning(f"✂️ [{self.username}] Auto-Trim aktif! Membuang {excess}x agar genap kelipatan 12.")
+        self._step("✂️", "Auto-Trim", f"Membuang {excess}x agar genap kelipatan 12")
+        
+        try:
+            res = await self._safe_request('GET', "https://siliwangibolukukus.com/cart/")
+            if not res:
+                return 0
+                
+            soup = BeautifulSoup(res.text, 'html.parser')
+            
+            nonce_field = soup.find('input', {'name': 'woocommerce-cart-nonce'})
+            if not nonce_field:
+                logger.error(f"❌ [{self.username}] Auto-Trim gagal: woocommerce-cart-nonce tidak ditemukan.")
+                return 0
+            nonce = nonce_field.get('value')
+            
+            qty_inputs = soup.find_all('input', {'class': 'qty'})
+            if not qty_inputs:
+                logger.error(f"❌ [{self.username}] Auto-Trim gagal: input qty tidak ditemukan.")
+                return 0
+                
+            payload = {
+                'update_cart': 'Update cart',
+                'woocommerce-cart-nonce': nonce
+            }
+            
+            removed_count = 0
+            for inp in qty_inputs:
+                name = inp.get('name')
+                try:
+                    current_qty = int(inp.get('value', 0))
+                except:
+                    current_qty = 0
+                    
+                if current_qty > 0 and removed_count < excess:
+                    can_remove = min(current_qty, excess - removed_count)
+                    new_qty = current_qty - can_remove
+                    payload[name] = str(new_qty)
+                    removed_count += can_remove
+                else:
+                    payload[name] = str(current_qty)
+                    
+            if removed_count > 0:
+                update_res = await self._safe_request('POST', "https://siliwangibolukukus.com/cart/", data=payload)
+                if update_res:
+                    logger.info(f"✅ [{self.username}] Auto-Trim berhasil membuang {removed_count}x.")
+                    return removed_count
+                    
+            return 0
+        except Exception as e:
+            logger.error(f"Error Auto-Trim {self.username}: {e}")
+            return 0
 
     # ------------------------------------------------------------------
     # AMBIL NONCE CHECKOUT & SECURITY
