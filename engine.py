@@ -61,7 +61,9 @@ class SiliwangiEngine:
         self.client = httpx.AsyncClient(
             headers=self.headers,
             follow_redirects=True,
-            timeout=20.0
+            timeout=15.0,
+            http2=True,
+            limits=httpx.Limits(max_keepalive_connections=20, max_connections=50)
         )
 
         self._load_saved_cookies()
@@ -466,10 +468,10 @@ class SiliwangiEngine:
                 # Server menolak — cek apakah ada stok parsial
                 if data.get('error'):
                     err_txt = str(data.get('error', ''))
-                    logger.warning(f"🕵️ [STOK] ID {prod_id} ditolak: {err_txt[:120]}")
+                    logger.warning(f"[STOK] ID {prod_id} ditolak: {err_txt[:120]}")
                     available = self._parse_available_stock(err_txt)
                     if available and 0 < available < qty:
-                        logger.info(f"📦 Stok parsial terdeteksi: {available}x tersedia untuk ID {prod_id}")
+                        logger.info(f"Stok parsial terdeteksi: {available}x tersedia untuk ID {prod_id}")
                         res2 = await self._safe_request('POST', url, headers=ajax_headers, data={
                             "product_id": str(prod_id),
                             "quantity":   str(available)
@@ -511,13 +513,16 @@ class SiliwangiEngine:
         success, added = await self._add_to_cart(target_id, qty)
         if success:
             logger.info(f"✅ [{self.username}] Masuk: {added}x {nama}")
+            self._step("🛒", f"{added}x {nama}", "Masuk")
             return True
 
         if target_tier == 0:
             logger.error(f"❌ [{self.username}] {nama} HABIS (Tier 0, no fallback).")
+            self._step("⚠️", f"{qty}x {nama}", "Habis — dilewati")
             return False
 
         logger.warning(f"⚠️ [{self.username}] {nama} HABIS! Mencari pengganti...")
+        self._step("⚠️", f"{nama} HABIS", "Mencari pengganti...")
         conn = sqlite3.connect(DB_NAME, timeout=10)
         cursor = conn.cursor()
         cursor.execute('''
@@ -532,10 +537,12 @@ class SiliwangiEngine:
             logger.info(f"   🔄 [{self.username}] Mencoba: {alt_nama} (Tier {alt_tier})...")
             ok, added = await self._add_to_cart(alt_id, qty)
             if ok:
-                logger.info(f"   🎯 [{self.username}] Disubstitusi dengan: {alt_nama}!")
+                logger.info(f"[{self.username}] Disubstitusi dengan: {alt_nama}!")
+                self._step("🔄", f"Substitusi {nama}", f"-> {added}x {alt_nama}")
                 return True
 
         logger.error(f"💀 [{self.username}] GAGAL TOTAL! Semua varian {kategori} habis.")
+        self._step("⚠️", f"{qty}x {nama}", f"Semua varian {kategori} habis")
         return False
 
     # ------------------------------------------------------------------
@@ -928,24 +935,12 @@ class SiliwangiEngine:
         if maxi_items:
             await self._smart_maxi_fill(maxi_items)
 
-        # ── DC & PLASTIK: Tambah secara PARALEL ────────────────────────
-        # DC: jika habis → catat di log, checkout tetap lanjut
-        # PLASTIK: selalu skip jika gagal, tidak batalkan order
-        async def _add_item_task(item, fallback_msg):
-            ok, added = await self._add_to_cart(item['id'], item['qty'])
-            if ok:
-                self._step("🛒", f"{added}x {item['nama']}", "Masuk")
-            else:
-                self._step("⚠️", f"{item['qty']}x {item['nama']}", fallback_msg)
-
-        tasks = []
+        # ── DC & PLASTIK: Tambah secara SEQUENTIAL (Menghindari WooCommerce Session Race Condition) ────────────────
         for item in dc_items:
-            tasks.append(_add_item_task(item, "DC HABIS — dilewati"))
+            await self.add_to_cart_with_fallback(item)
+            
         for item in plastik_items:
-            tasks.append(_add_item_task(item, "Plastik HABIS — dilewati"))
-
-        if tasks:
-            await asyncio.gather(*tasks)
+            await self.add_to_cart_with_fallback(item)
 
         if not await self.get_checkout_nonce():
             self._step("❌", "Checkout Nonce", "Tidak ditemukan")

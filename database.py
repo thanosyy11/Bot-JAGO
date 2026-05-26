@@ -181,9 +181,9 @@ def init_db():
         (168132, "MAXI Cokelat Tiramisu",        "MAXI", 1),
         (312,    "MAXI Brownies Coklat",         "MAXI", 1),
         # === MAXI Tier 2 ===
-        (306,    "MAXI Susu Lembang",            "MAXI", 2),
         (19077,  "MAXI Pandan Wangi",            "MAXI", 2),
         (24883,  "MAXI Red Velvet",              "MAXI", 2),
+        (306,    "MAXI Susu Lembang",            "MAXI", 2),
         (313,    "MAXI Talas Bogor",             "MAXI", 2),
         (168131, "MAXI Durian Musang King",      "MAXI", 2),
         # === MAXI Tier 3 ===
