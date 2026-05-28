@@ -4,6 +4,7 @@ import urllib.parse
 import httpx
 from bs4 import BeautifulSoup
 import sqlite3
+import aiosqlite
 import json
 from datetime import datetime, timedelta
 import pytz
@@ -66,8 +67,11 @@ class SiliwangiEngine:
             limits=httpx.Limits(max_keepalive_connections=20, max_connections=50)
         )
 
-        self._load_saved_cookies()
+        # self._load_saved_cookies() dipindahkan ke method async
 
+
+    async def init_session(self):
+        await self._load_saved_cookies()
     # ------------------------------------------------------------------
     # STEP LOGGER (untuk laporan dry run)
     # ------------------------------------------------------------------
@@ -173,7 +177,7 @@ class SiliwangiEngine:
                     self.reconnect_attempt += 1
 
                     # Clear cookies & re-login
-                    clear_session_cookies(self.telegram_id, self.username)
+                    await clear_session_cookies(self.telegram_id, self.username)
                     logger.info(f"🔄 [{self.username}] Reconnect attempt {self.reconnect_attempt}/{self.max_reconnect_attempts}...")
 
                     if await self.login():
@@ -193,15 +197,15 @@ class SiliwangiEngine:
             logger.error(f"Error di _safe_request_with_recovery [{self.username}]: {e}")
             return None
 
-    def _get_credentials(self):
-        conn = sqlite3.connect(DB_NAME, timeout=10)
-        cursor = conn.cursor()
-        cursor.execute(
+    async def _get_credentials(self):
+        conn = await aiosqlite.connect(DB_NAME, timeout=10)
+        cursor = await conn.cursor()
+        await cursor.execute(
             "SELECT password FROM users WHERE telegram_id = ? AND username = ?",
             (self.telegram_id, self.username)
         )
-        row = cursor.fetchone()
-        conn.close()
+        row = await cursor.fetchone()
+        await conn.close()
         if row:
             self.password = decrypt_password(row[0])
             return True
@@ -216,7 +220,7 @@ class SiliwangiEngine:
         Mengecek apakah situs diproteksi oleh plugin 'Password Protected'.
         Jika ya, otomatis menembus dengan menggunakan password global dari DB.
         """
-        global_pwd = get_setting("kode_akses", "")
+        global_pwd = await get_setting("kode_akses", "")
         if not global_pwd:
             return  # Jika belum diset, abaikan saja
 
@@ -250,9 +254,9 @@ class SiliwangiEngine:
     # SESSION MANAGEMENT
     # ------------------------------------------------------------------
 
-    def _load_saved_cookies(self):
+    async def _load_saved_cookies(self):
         """Muat cookies tersimpan dari DB ke httpx client."""
-        saved = load_session_cookies(self.telegram_id, self.username)
+        saved = await load_session_cookies(self.telegram_id, self.username)
         if saved:
             if isinstance(saved, list):
                 for c in saved:
@@ -292,7 +296,7 @@ class SiliwangiEngine:
         logger.debug(f"🔍 [{self.username}] Validating session freshness...")
         return False  # Will trigger re-validation in caller
 
-    def _save_cookies(self):
+    async def _save_cookies(self):
         """Simpan cookies httpx saat ini ke DB dan update timestamp."""
         try:
             cookies_list = []
@@ -305,7 +309,7 @@ class SiliwangiEngine:
                     'secure': cookie.secure
                 })
             if cookies_list:
-                save_session_cookies(self.telegram_id, self.username, cookies_list)
+                await save_session_cookies(self.telegram_id, self.username, cookies_list)
                 self.last_session_check_at = datetime.now()  # Update timestamp
                 logger.info(f"💾 [{self.username}] {len(cookies_list)} cookies disimpan ke DB (session fresh).")
         except Exception as e:
@@ -319,7 +323,7 @@ class SiliwangiEngine:
         # Panggil bypass password sebelum login
         await self.bypass_site_password()
 
-        if not self._get_credentials():
+        if not await self._get_credentials():
             logger.error(f"Kredensial tidak ditemukan untuk: {self.username}")
             return False
 
@@ -332,14 +336,14 @@ class SiliwangiEngine:
             # Cek apakah sesi masih aktif (via cookies tersimpan)
             if "Keluar" in response.text or "Logout" in response.text or "Pesanan" in response.text:
                 logger.info(f"✅ [{self.username}] Sesi masih aktif (cookies).")
-                self._save_cookies()
+                await self._save_cookies()
                 return True
 
             # Session expired → clear lama, fresh login
             logger.info(f"🔐 [{self.username}] Session expired, login ulang...")
-            clear_session_cookies(self.telegram_id, self.username)
+            await clear_session_cookies(self.telegram_id, self.username)
 
-            soup = BeautifulSoup(response.text, 'html.parser')
+            soup = BeautifulSoup(response.text, 'lxml')
             nonce_field = soup.find('input', {'name': 'woocommerce-login-nonce'})
             if not nonce_field:
                 logger.error(f"Gagal mendapatkan Login Nonce untuk: {self.username}")
@@ -355,7 +359,7 @@ class SiliwangiEngine:
             login_res = await self._safe_request('POST', url_account, data=payload)
             if login_res and ("Keluar" in login_res.text or "Logout" in login_res.text):
                 logger.info(f"✅ Login sukses (fresh): {self.username}")
-                self._save_cookies()
+                await self._save_cookies()
                 return True
             else:
                 logger.warning(f"❌ Login gagal: {self.username}")
@@ -399,7 +403,7 @@ class SiliwangiEngine:
             res = await self._safe_request('GET', "https://siliwangibolukukus.com/cart/")
             if not res:
                 return
-            soup = BeautifulSoup(res.text, 'html.parser')
+            soup = BeautifulSoup(res.text, 'lxml')
             remove_links = soup.find_all('a', class_='remove')
             if not remove_links:
                 logger.info(f"✨ [{self.username}] Keranjang sudah bersih.")
@@ -523,15 +527,15 @@ class SiliwangiEngine:
 
         logger.warning(f"⚠️ [{self.username}] {nama} HABIS! Mencari pengganti...")
         self._step("⚠️", f"{nama} HABIS", "Mencari pengganti...")
-        conn = sqlite3.connect(DB_NAME, timeout=10)
-        cursor = conn.cursor()
-        cursor.execute('''
+        conn = await aiosqlite.connect(DB_NAME, timeout=10)
+        cursor = await conn.cursor()
+        await cursor.execute('''
             SELECT id, nama, tier FROM products
             WHERE kategori=? AND tier>0 AND id!=?
             ORDER BY ABS(tier - ?) ASC
         ''', (kategori, target_id, target_tier))
-        alternatives = cursor.fetchall()
-        conn.close()
+        alternatives = await cursor.fetchall()
+        await conn.close()
 
         for alt_id, alt_nama, alt_tier in alternatives:
             logger.info(f"   🔄 [{self.username}] Mencoba: {alt_nama} (Tier {alt_tier})...")
@@ -571,15 +575,15 @@ class SiliwangiEngine:
         # 2. Produk MAXI lain dari DB (belum di-request, sebagai fallback)
         user_ids = {item['id'] for item in maxi_items}
 
-        conn = sqlite3.connect(DB_NAME, timeout=10)
-        cursor = conn.cursor()
-        cursor.execute('''
+        conn = await aiosqlite.connect(DB_NAME, timeout=10)
+        cursor = await conn.cursor()
+        await cursor.execute('''
             SELECT id, nama, tier FROM products
             WHERE kategori='MAXI' AND tier > 0
             ORDER BY tier ASC, id ASC
         ''')
-        all_maxi_db = {row[0]: row for row in cursor.fetchall()}
-        conn.close()
+        all_maxi_db = {row[0]: row for row in await cursor.fetchall()}
+        await conn.close()
 
         # Priority queue: user's items first, then DB fallbacks
         priority_queue = list(maxi_items)  # dicts dengan 'id','nama','qty','tier'
@@ -665,7 +669,7 @@ class SiliwangiEngine:
             if not res:
                 return 0
                 
-            soup = BeautifulSoup(res.text, 'html.parser')
+            soup = BeautifulSoup(res.text, 'lxml')
             
             nonce_field = soup.find('input', {'name': 'woocommerce-cart-nonce'})
             if not nonce_field:
@@ -731,7 +735,7 @@ class SiliwangiEngine:
                 loc = res.headers.get("Location", "")
                 logger.warning(f"⚠️ [{self.username}] Checkout redirect ke {loc} — coba re-login...")
                 # Re-login sekali
-                clear_session_cookies(self.telegram_id, self.username)
+                await clear_session_cookies(self.telegram_id, self.username)
                 if not await self.login():
                     logger.error(f"❌ [{self.username}] Re-login sebelum nonce GAGAL")
                     return False
@@ -744,7 +748,7 @@ class SiliwangiEngine:
                     logger.error(f"❌ [{self.username}] Setelah re-login masih terpental: {res.url}")
                     return False
 
-            soup = BeautifulSoup(res.text, 'html.parser')
+            soup = BeautifulSoup(res.text, 'lxml')
 
             # Nonce 1: checkout nonce
             nonce_field = soup.find('input', {'name': 'woocommerce-process-checkout-nonce'})
@@ -809,7 +813,7 @@ class SiliwangiEngine:
             return full_match.group(1)
 
         # ── Strategi 3: Hidden input[name=security] ───────────────────────────
-        soup = BeautifulSoup(html_text, 'html.parser')
+        soup = BeautifulSoup(html_text, 'lxml')
         field = soup.find('input', {'name': 'security'})
         if field and field.get('value'):
             logger.info(f"[NONCE] Ditemukan via hidden input[security].")
@@ -898,16 +902,16 @@ class SiliwangiEngine:
             return False
         self._step("✅", "Login", "Sesi aktif")
 
-        conn = sqlite3.connect(DB_NAME, timeout=10)
-        cursor = conn.cursor()
-        cursor.execute(
+        conn = await aiosqlite.connect(DB_NAME, timeout=10)
+        cursor = await conn.cursor()
+        await cursor.execute(
             "SELECT id, payload_json, total_maxi FROM draft_orders "
             "WHERE telegram_id=? AND username=? AND status='PENDING' "
             "ORDER BY id DESC LIMIT 1",
             (self.telegram_id, self.username)
         )
-        row = cursor.fetchone()
-        conn.close()
+        row = await cursor.fetchone()
+        await conn.close()
 
         if not row:
             logger.error(f"🛑 [{self.username}] Draf KOSONG dari database saat eksekusi!")
@@ -944,7 +948,7 @@ class SiliwangiEngine:
 
         if not await self.get_checkout_nonce():
             self._step("❌", "Checkout Nonce", "Tidak ditemukan")
-            self._mark_failed("Gagal ambil checkout nonce")
+            await self._mark_failed("Gagal ambil checkout nonce")
             return False
         self._step("🔐", "Checkout Nonce",
                    f"{self.checkout_nonce[:8]}..." if self.checkout_nonce else "N/A")
@@ -960,7 +964,7 @@ class SiliwangiEngine:
             # Ambil alasan dari step_log terakhir yang error
             err_lines = [l for l in self.step_log if any(c in l for c in ["❌", "⚠️"])]
             reason = err_lines[-1][:120] if err_lines else "Checkout gagal"
-            self._mark_failed(reason)
+            await self._mark_failed(reason)
         return result
 
     # ------------------------------------------------------------------
@@ -972,7 +976,7 @@ class SiliwangiEngine:
             # 1) Verifikasi keranjang tidak kosong
             cart_res = await self._safe_request_with_recovery('GET', "https://siliwangibolukukus.com/cart/")
             if cart_res:
-                soup_cart = BeautifulSoup(cart_res.text, 'html.parser')
+                soup_cart = BeautifulSoup(cart_res.text, 'lxml')
                 error_notices = soup_cart.find_all(class_=['woocommerce-error', 'error'])
                 if error_notices:
                     pesan = " | ".join([e.get_text(strip=True) for e in error_notices])
@@ -993,7 +997,7 @@ class SiliwangiEngine:
                     self._simpan_snapshot_html(res.text, "Terpental_Kasir")
                 return False
 
-            soup = BeautifulSoup(res.text, 'html.parser')
+            soup = BeautifulSoup(res.text, 'lxml')
             form = soup.find('form', {'name': 'checkout'})
             if not form:
                 return False
@@ -1096,7 +1100,7 @@ class SiliwangiEngine:
                 self.order_id_woo = m.group(1) if m else "UNKNOWN"
                 logger.warning(f"⚠️ Redirect history: {len(final_res.history)} redirects. Order ID: {self.order_id_woo}")
                 nominal = await self._scrape_order_nominal(self.order_id_woo)
-                self._mark_success(nominal)
+                await self._mark_success(nominal)
                 return True
 
             # Cek sukses via teks HTML
@@ -1105,7 +1109,7 @@ class SiliwangiEngine:
                 nominal = await self._scrape_order_nominal(
                     getattr(self, 'order_id_woo', 'UNKNOWN')
                 )
-                self._mark_success(nominal)
+                await self._mark_success(nominal)
                 return True
 
             logger.error(f"💀 [{self.username}] Checkout GAGAL. Response: {final_res.text[:200]}")
@@ -1120,21 +1124,21 @@ class SiliwangiEngine:
     # MARK SUCCESS — hapus draft, simpan ke history
     # ------------------------------------------------------------------
 
-    def _mark_success(self, total_nominal: str = ''):
+    async def _mark_success(self, total_nominal: str = ''):
         """
         Atomik: INSERT ke order_history (status=SUKSES) + DELETE dari draft_orders.
         Jika salah satu gagal, keduanya di-rollback agar data konsisten.
         """
-        conn = sqlite3.connect(DB_NAME, timeout=10)
-        cursor = conn.cursor()
+        conn = await aiosqlite.connect(DB_NAME, timeout=10)
+        cursor = await conn.cursor()
         try:
-            cursor.execute(
+            await cursor.execute(
                 "SELECT telegram_id, username, total_maxi, payload_json FROM draft_orders WHERE id=?",
                 (self.order_id,)
             )
-            row = cursor.fetchone()
+            row = await cursor.fetchone()
             if row:
-                cursor.execute('''
+                await cursor.execute('''
                     INSERT INTO order_history
                         (telegram_id, username, total_maxi, payload_json,
                          order_id, status, total_nominal)
@@ -1147,39 +1151,36 @@ class SiliwangiEngine:
                     f"⚠️ [{self.username}] Draft ID {self.order_id} tidak ditemukan saat _mark_success!"
                 )
 
-            cursor.execute("DELETE FROM draft_orders WHERE id=?", (self.order_id,))
-            conn.commit()
+            await cursor.execute("DELETE FROM draft_orders WHERE id=?", (self.order_id,))
+            await conn.commit()
             logger.info(f"✅ [{self.username}] Draft dihapus, riwayat tersimpan.")
         except Exception as e:
-            conn.rollback()
+            await conn.rollback()
             logger.error(f"❌ [{self.username}] _mark_success GAGAL, rollback: {e}", exc_info=True)
             raise
         finally:
-            conn.close()
+            await conn.close()
 
-    def _mark_failed(self, reason: str = 'Checkout gagal'):
-        """
-        Simpan riwayat order GAGAL ke order_history.
-        Dipanggil dari execute_order() saat checkout tidak berhasil.
-        """
+    async def _mark_failed(self, reason: str):
+        """Mencatat order gagal ke database agar masuk riwayat."""
         if not self._draft_payload_json:
             return  # Belum ada draft yang diproses, jangan simpan
-        conn = sqlite3.connect(DB_NAME, timeout=10)
-        cursor = conn.cursor()
+        conn = await aiosqlite.connect(DB_NAME, timeout=10)
+        cursor = await conn.cursor()
         try:
-            cursor.execute('''
+            await cursor.execute('''
                 INSERT INTO order_history
                     (telegram_id, username, total_maxi, payload_json,
                      order_id, status, total_nominal)
                 VALUES (?, ?, ?, ?, 'N/A', 'GAGAL', ?)
             ''', (self.telegram_id, self.username, self._draft_total_maxi,
                   self._draft_payload_json, reason[:120]))
-            conn.commit()
+            await conn.commit()
             logger.info(f"📚 [{self.username}] Riwayat GAGAL tersimpan: {reason[:60]}")
         except Exception as e:
             logger.error(f"❌ [{self.username}] _mark_failed error: {e}")
         finally:
-            conn.close()
+            await conn.close()
 
     async def _scrape_order_nominal(self, order_id_woo: str) -> str:
         """Scrape total nominal dari halaman order-received setelah checkout sukses."""
@@ -1188,7 +1189,7 @@ class SiliwangiEngine:
             res = await self._safe_request('GET', url)
             if not res:
                 return ''
-            soup = BeautifulSoup(res.text, 'html.parser')
+            soup = BeautifulSoup(res.text, 'lxml')
             # Cari total di overview WooCommerce
             total_el = soup.find(class_='woocommerce-order-overview__total')
             if total_el:

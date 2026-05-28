@@ -1,4 +1,5 @@
 import sqlite3
+import aiosqlite
 import json
 import logging
 import os
@@ -212,91 +213,91 @@ def init_db():
     print("[OK] Database berhasil diinisialisasi & dimigrasi")
 
 
-def set_engine_ready_status(telegram_id: str, username: str, is_ready: bool):
-    conn = sqlite3.connect(DB_NAME, timeout=10)
-    cursor = conn.cursor()
-    cursor.execute('''
+async def set_engine_ready_status(telegram_id: str, username: str, is_ready: bool):
+    conn = await aiosqlite.connect(DB_NAME, timeout=10)
+    cursor = await conn.cursor()
+    await cursor.execute('''
         INSERT INTO engine_ready_status (telegram_id, username, is_ready)
         VALUES (?, ?, ?)
         ON CONFLICT(telegram_id, username) DO UPDATE SET is_ready=?
     ''', (telegram_id, username, int(is_ready), int(is_ready)))
-    conn.commit()
-    conn.close()
+    await conn.commit()
+    await conn.close()
 
 
-def get_engine_ready_status(telegram_id: str, username: str) -> bool:
-    conn = sqlite3.connect(DB_NAME, timeout=10)
-    cursor = conn.cursor()
-    cursor.execute("SELECT is_ready FROM engine_ready_status WHERE telegram_id=? AND username=?", (telegram_id, username))
-    row = cursor.fetchone()
-    conn.close()
+async def get_engine_ready_status(telegram_id: str, username: str) -> bool:
+    conn = await aiosqlite.connect(DB_NAME, timeout=10)
+    cursor = await conn.cursor()
+    await cursor.execute("SELECT is_ready FROM engine_ready_status WHERE telegram_id=? AND username=?", (telegram_id, username))
+    row = await cursor.fetchone()
+    await conn.close()
     return bool(row[0]) if row else False
 
 
-def save_user_credentials(telegram_id, username, password):
+async def save_user_credentials(telegram_id, username, password):
     """Menyimpan kredensial dengan password terenkripsi."""
     encrypted = encrypt_password(password)
-    conn = sqlite3.connect(DB_NAME, timeout=10)
-    cursor = conn.cursor()
-    cursor.execute("UPDATE users SET is_active = 0 WHERE telegram_id = ?", (telegram_id,))
-    cursor.execute('''
+    conn = await aiosqlite.connect(DB_NAME, timeout=10)
+    cursor = await conn.cursor()
+    await cursor.execute("UPDATE users SET is_active = 0 WHERE telegram_id = ?", (telegram_id,))
+    await cursor.execute('''
         INSERT INTO users (telegram_id, username, password, is_active)
         VALUES (?, ?, ?, 1)
         ON CONFLICT(telegram_id, username) DO UPDATE SET password=?, is_active=1
     ''', (telegram_id, username, encrypted, encrypted))
-    conn.commit()
-    conn.close()
+    await conn.commit()
+    await conn.close()
 
-def get_current_user(telegram_id):
-    conn = sqlite3.connect(DB_NAME, timeout=10)
-    cursor = conn.cursor()
-    cursor.execute("SELECT username FROM users WHERE telegram_id = ? AND is_active = 1", (telegram_id,))
-    row = cursor.fetchone()
-    conn.close()
+async def get_current_user(telegram_id):
+    conn = await aiosqlite.connect(DB_NAME, timeout=10)
+    cursor = await conn.cursor()
+    await cursor.execute("SELECT username FROM users WHERE telegram_id = ? AND is_active = 1", (telegram_id,))
+    row = await cursor.fetchone()
+    await conn.close()
     return row[0] if row else None
 
-def get_all_accounts(telegram_id):
-    conn = sqlite3.connect(DB_NAME, timeout=10)
-    cursor = conn.cursor()
-    cursor.execute("SELECT username, is_active FROM users WHERE telegram_id = ?", (telegram_id,))
-    rows = cursor.fetchall()
-    conn.close()
+async def get_all_accounts(telegram_id):
+    conn = await aiosqlite.connect(DB_NAME, timeout=10)
+    cursor = await conn.cursor()
+    await cursor.execute("SELECT username, is_active FROM users WHERE telegram_id = ?", (telegram_id,))
+    rows = await cursor.fetchall()
+    await conn.close()
     return rows
 
-def set_active_account(telegram_id, target_username):
-    conn = sqlite3.connect(DB_NAME, timeout=10)
-    cursor = conn.cursor()
-    cursor.execute("UPDATE users SET is_active = 0 WHERE telegram_id = ?", (telegram_id,))
-    cursor.execute("UPDATE users SET is_active = 1 WHERE telegram_id = ? AND username = ?", (telegram_id, target_username))
-    conn.commit()
-    conn.close()
+async def set_active_account(telegram_id, target_username):
+    conn = await aiosqlite.connect(DB_NAME, timeout=10)
+    cursor = await conn.cursor()
+    await cursor.execute("UPDATE users SET is_active = 0 WHERE telegram_id = ?", (telegram_id,))
+    await cursor.execute("UPDATE users SET is_active = 1 WHERE telegram_id = ? AND username = ?", (telegram_id, target_username))
+    await conn.commit()
+    await conn.close()
 
 
 # ============================================================
 # SESSION MANAGEMENT (cookies per akun)
 # ============================================================
 
-def save_session_cookies(telegram_id: str, username: str, cookies: dict):
+async def save_session_cookies(telegram_id: str, username: str, cookies: dict):
     """Simpan cookies httpx ke DB agar bot tidak perlu login ulang setelah restart."""
-    conn = sqlite3.connect(DB_NAME, timeout=10)
-    cursor = conn.cursor()
-    cursor.execute('''
+    conn = await aiosqlite.connect(DB_NAME, timeout=10)
+    cursor = await conn.cursor()
+    await cursor.execute('''
         INSERT OR REPLACE INTO sessions (telegram_id, username, cookies_json, saved_at)
         VALUES (?, ?, ?, CURRENT_TIMESTAMP)
     ''', (telegram_id, username, json.dumps(cookies)))
-    conn.commit()
-    conn.close()
+    await conn.commit()
+    await conn.close()
 
-def load_session_cookies(telegram_id: str, username: str) -> dict:
+async def load_session_cookies(telegram_id: str, username: str) -> dict:
     """Ambil cookies tersimpan. Return dict kosong jika belum ada."""
-    conn = sqlite3.connect(DB_NAME, timeout=10)
-    cursor = conn.cursor()
-    cursor.execute(
+    conn = await aiosqlite.connect(DB_NAME, timeout=10)
+    cursor = await conn.cursor()
+    await cursor.execute(
         "SELECT cookies_json FROM sessions WHERE telegram_id=? AND username=?",
         (telegram_id, username)
     )
-    row = cursor.fetchone()
-    conn.close()
+    row = await cursor.fetchone()
+    await conn.close()
     if row and row[0]:
         try:
             return json.loads(row[0])
@@ -304,94 +305,94 @@ def load_session_cookies(telegram_id: str, username: str) -> dict:
             return {}
     return {}
 
-def clear_session_cookies(telegram_id: str, username: str):
+async def clear_session_cookies(telegram_id: str, username: str):
     """Hapus session (saat logout manual atau session expired)."""
-    conn = sqlite3.connect(DB_NAME, timeout=10)
-    cursor = conn.cursor()
-    cursor.execute(
+    conn = await aiosqlite.connect(DB_NAME, timeout=10)
+    cursor = await conn.cursor()
+    await cursor.execute(
         "DELETE FROM sessions WHERE telegram_id=? AND username=?",
         (telegram_id, username)
     )
-    conn.commit()
-    conn.close()
+    await conn.commit()
+    await conn.close()
 
-def get_session_status(telegram_id: str, username: str) -> bool:
+async def get_session_status(telegram_id: str, username: str) -> bool:
     """Cek apakah akun punya session cookies tersimpan."""
     cookies = load_session_cookies(telegram_id, username)
     return bool(cookies)
 
-def get_all_accounts_with_status(telegram_id: str) -> list:
+async def get_all_accounts_with_status(telegram_id: str) -> list:
     """
     Return list of (username, is_active, has_session, nickname).
     Digunakan di menu akun untuk tampilkan status login setiap akun.
     """
-    conn = sqlite3.connect(DB_NAME, timeout=10)
-    cursor = conn.cursor()
-    cursor.execute(
+    conn = await aiosqlite.connect(DB_NAME, timeout=10)
+    cursor = await conn.cursor()
+    await cursor.execute(
         "SELECT username, is_active, COALESCE(nickname, '') FROM users WHERE telegram_id = ? ORDER BY is_active DESC, username ASC",
         (telegram_id,)
     )
-    rows = cursor.fetchall()
+    rows = await cursor.fetchall()
     # Cek session per akun
-    cursor.execute(
+    await cursor.execute(
         "SELECT username FROM sessions WHERE telegram_id = ?",
         (telegram_id,)
     )
-    session_users = {r[0] for r in cursor.fetchall()}
-    conn.close()
+    session_users = {r[0] for r in await cursor.fetchall()}
+    await conn.close()
     return [(u, is_active, u in session_users, nick) for u, is_active, nick in rows]
 
-def count_accounts(telegram_id: str) -> int:
+async def count_accounts(telegram_id: str) -> int:
     """Hitung jumlah akun terdaftar."""
-    conn = sqlite3.connect(DB_NAME, timeout=10)
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM users WHERE telegram_id=?", (telegram_id,))
-    row = cursor.fetchone()
-    conn.close()
+    conn = await aiosqlite.connect(DB_NAME, timeout=10)
+    cursor = await conn.cursor()
+    await cursor.execute("SELECT COUNT(*) FROM users WHERE telegram_id=?", (telegram_id,))
+    row = await cursor.fetchone()
+    await conn.close()
     return row[0] if row else 0
 
 
-def get_account_nickname(telegram_id: str, username: str) -> str:
+async def get_account_nickname(telegram_id: str, username: str) -> str:
     """Ambil nickname akun. Return string kosong jika belum diset."""
-    conn = sqlite3.connect(DB_NAME, timeout=10)
-    cursor = conn.cursor()
-    cursor.execute(
+    conn = await aiosqlite.connect(DB_NAME, timeout=10)
+    cursor = await conn.cursor()
+    await cursor.execute(
         "SELECT COALESCE(nickname, '') FROM users WHERE telegram_id=? AND username=?",
         (telegram_id, username)
     )
-    row = cursor.fetchone()
-    conn.close()
+    row = await cursor.fetchone()
+    await conn.close()
     return row[0] if row else ''
 
 
-def update_account_nickname(telegram_id: str, username: str, nickname: str) -> None:
+async def update_account_nickname(telegram_id: str, username: str, nickname: str) -> None:
     """Simpan atau perbarui nickname untuk akun."""
-    conn = sqlite3.connect(DB_NAME, timeout=10)
-    cursor = conn.cursor()
-    cursor.execute(
+    conn = await aiosqlite.connect(DB_NAME, timeout=10)
+    cursor = await conn.cursor()
+    await cursor.execute(
         "UPDATE users SET nickname=? WHERE telegram_id=? AND username=?",
         (nickname.strip(), telegram_id, username)
     )
-    conn.commit()
-    conn.close()
+    await conn.commit()
+    await conn.close()
 
 
-def delete_account(telegram_id: str, username: str) -> None:
+async def delete_account(telegram_id: str, username: str) -> None:
     """Hapus akun beserta seluruh data terkait (session, draft, engine status)."""
-    conn = sqlite3.connect(DB_NAME, timeout=10)
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM users WHERE telegram_id=? AND username=?", (telegram_id, username))
-    cursor.execute("DELETE FROM sessions WHERE telegram_id=? AND username=?", (telegram_id, username))
-    cursor.execute("DELETE FROM draft_orders WHERE telegram_id=? AND username=?", (telegram_id, username))
-    cursor.execute("DELETE FROM engine_ready_status WHERE telegram_id=? AND username=?", (telegram_id, username))
-    conn.commit()
-    conn.close()
+    conn = await aiosqlite.connect(DB_NAME, timeout=10)
+    cursor = await conn.cursor()
+    await cursor.execute("DELETE FROM users WHERE telegram_id=? AND username=?", (telegram_id, username))
+    await cursor.execute("DELETE FROM sessions WHERE telegram_id=? AND username=?", (telegram_id, username))
+    await cursor.execute("DELETE FROM draft_orders WHERE telegram_id=? AND username=?", (telegram_id, username))
+    await cursor.execute("DELETE FROM engine_ready_status WHERE telegram_id=? AND username=?", (telegram_id, username))
+    await conn.commit()
+    await conn.close()
 
 # ============================================================
 # CRUD DRAFT ORDERS
 # ============================================================
 
-def simpan_draft_order(telegram_id, total_maxi, keranjang):
+async def simpan_draft_order(telegram_id, total_maxi, keranjang):
     """
     Simpan draf pesanan untuk akun aktif.
     Selalu REPLACE — 1 akun hanya boleh punya 1 draf PENDING.
@@ -399,60 +400,60 @@ def simpan_draft_order(telegram_id, total_maxi, keranjang):
     active_user = get_current_user(telegram_id)
     if not active_user:
         return False
-    conn = sqlite3.connect(DB_NAME, timeout=10)
-    cursor = conn.cursor()
+    conn = await aiosqlite.connect(DB_NAME, timeout=10)
+    cursor = await conn.cursor()
     # Hapus semua pending lama untuk akun ini dulu (aman, atomik)
-    cursor.execute(
+    await cursor.execute(
         "DELETE FROM draft_orders WHERE telegram_id=? AND username=? AND status='PENDING'",
         (telegram_id, active_user)
     )
-    cursor.execute('''
+    await cursor.execute('''
         INSERT INTO draft_orders (telegram_id, username, total_maxi, payload_json)
         VALUES (?, ?, ?, ?)
     ''', (telegram_id, active_user, total_maxi, json.dumps(keranjang)))
-    conn.commit()
-    conn.close()
+    await conn.commit()
+    await conn.close()
     return True
 
-def get_pending_order(telegram_id):
+async def get_pending_order(telegram_id):
     """Ambil draf PENDING terbaru akun aktif, beserta info tanggalnya."""
     active_user = get_current_user(telegram_id)
     if not active_user:
         return None
-    conn = sqlite3.connect(DB_NAME, timeout=10)
-    cursor = conn.cursor()
-    cursor.execute('''
+    conn = await aiosqlite.connect(DB_NAME, timeout=10)
+    cursor = await conn.cursor()
+    await cursor.execute('''
         SELECT id, total_maxi, payload_json,
                datetime(created_at, 'localtime') as tgl_buat
         FROM draft_orders
         WHERE telegram_id = ? AND username = ? AND status = 'PENDING'
         ORDER BY id DESC LIMIT 1
     ''', (telegram_id, active_user))
-    row = cursor.fetchone()
-    conn.close()
+    row = await cursor.fetchone()
+    await conn.close()
     return row  # (id, total_maxi, payload_json, tgl_buat)
 
-def delete_pending_order(telegram_id):
+async def delete_pending_order(telegram_id):
     active_user = get_current_user(telegram_id)
     if not active_user:
         return
-    conn = sqlite3.connect(DB_NAME, timeout=10)
-    cursor = conn.cursor()
-    cursor.execute('''
+    conn = await aiosqlite.connect(DB_NAME, timeout=10)
+    cursor = await conn.cursor()
+    await cursor.execute('''
         DELETE FROM draft_orders
         WHERE telegram_id = ? AND username = ? AND status = 'PENDING'
     ''', (telegram_id, active_user))
-    conn.commit()
-    conn.close()
+    await conn.commit()
+    await conn.close()
 
-def get_all_pending_orders_multi(telegram_id):
+async def get_all_pending_orders_multi(telegram_id):
     """
     Ambil 1 draf PENDING terbaru PER AKUN.
     Aman dari duplikat: jika ada 2 draf untuk 1 akun, ambil yang terbaru.
     """
-    conn = sqlite3.connect(DB_NAME, timeout=10)
-    cursor = conn.cursor()
-    cursor.execute('''
+    conn = await aiosqlite.connect(DB_NAME, timeout=10)
+    cursor = await conn.cursor()
+    await cursor.execute('''
         SELECT d.id, d.username, d.payload_json
         FROM draft_orders d
         INNER JOIN (
@@ -464,45 +465,45 @@ def get_all_pending_orders_multi(telegram_id):
         WHERE d.telegram_id = ?
         ORDER BY d.id ASC
     ''', (telegram_id, telegram_id))
-    rows = cursor.fetchall()
-    conn.close()
+    rows = await cursor.fetchall()
+    await conn.close()
     return rows
 
-def cleanup_all_pending_orders(telegram_id):
+async def cleanup_all_pending_orders(telegram_id):
     """
     Cleanup jam 09:00: hapus draf yang dibuat SEBELUM jam 08:00 hari ini.
     Aman: draf yang diinput setelah jam 08:00 (untuk besok) TIDAK dihapus.
     """
-    conn = sqlite3.connect(DB_NAME, timeout=10)
-    cursor = conn.cursor()
+    conn = await aiosqlite.connect(DB_NAME, timeout=10)
+    cursor = await conn.cursor()
     # Hanya hapus draf yang dibuat sebelum jam 08:00 WIB hari ini
     # 'localtime' di SQLite = UTC+0, jadi 08:00 WIB = 01:00 UTC
-    cursor.execute('''
+    await cursor.execute('''
         DELETE FROM draft_orders
         WHERE telegram_id = ? AND status = 'PENDING'
         AND created_at < datetime('now', 'start of day', '+1 hours')
     ''', (telegram_id,))
     deleted = cursor.rowcount
-    conn.commit()
-    conn.close()
+    await conn.commit()
+    await conn.close()
     return deleted
 
-def get_all_drafts_overview(telegram_id: str) -> list:
+async def get_all_drafts_overview(telegram_id: str) -> list:
     """
     Untuk menu kelola: ambil status draf semua akun.
     Return: list of (username, is_active, has_draft, total_maxi, tgl_buat, nickname)
     """
-    conn = sqlite3.connect(DB_NAME, timeout=10)
-    cursor = conn.cursor()
+    conn = await aiosqlite.connect(DB_NAME, timeout=10)
+    cursor = await conn.cursor()
     # Semua akun terdaftar
-    cursor.execute(
+    await cursor.execute(
         "SELECT username, is_active, COALESCE(nickname, '') FROM users WHERE telegram_id=? ORDER BY is_active DESC, username ASC",
         (telegram_id,)
     )
     accounts = cursor.fetchall()
 
     # Draf pending terbaru per akun
-    cursor.execute('''
+    await cursor.execute('''
         SELECT d.username, d.total_maxi, datetime(d.created_at, 'localtime')
         FROM draft_orders d
         INNER JOIN (
@@ -514,7 +515,7 @@ def get_all_drafts_overview(telegram_id: str) -> list:
         WHERE d.telegram_id = ?
     ''', (telegram_id, telegram_id))
     drafts = {row[0]: (row[1], row[2]) for row in cursor.fetchall()}
-    conn.close()
+    await conn.close()
 
     result = []
     for username, is_active, nickname in accounts:
@@ -530,12 +531,12 @@ def get_all_drafts_overview(telegram_id: str) -> list:
 # PRODUK
 # ============================================================
 
-def get_all_products_dict():
-    conn = sqlite3.connect(DB_NAME, timeout=10)
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, nama, kategori, tier FROM products")
-    rows = cursor.fetchall()
-    conn.close()
+async def get_all_products_dict():
+    conn = await aiosqlite.connect(DB_NAME, timeout=10)
+    cursor = await conn.cursor()
+    await cursor.execute("SELECT id, nama, kategori, tier FROM products")
+    rows = await cursor.fetchall()
+    await conn.close()
     products_db = {}
     for r in rows:
         products_db[r[1]] = {"id": r[0], "kategori": r[2], "tier": r[3]}
@@ -546,33 +547,33 @@ def get_all_products_dict():
 # RIWAYAT ORDER
 # ============================================================
 
-def get_order_history_dates(telegram_id: str) -> list:
+async def get_order_history_dates(telegram_id: str) -> list:
     """
     Ambil 5 tanggal unik terbaru yang punya riwayat order (semua akun).
     Return: list of date strings 'YYYY-MM-DD', urut terbaru dulu.
     """
-    conn = sqlite3.connect(DB_NAME, timeout=10)
-    cursor = conn.cursor()
-    cursor.execute('''
+    conn = await aiosqlite.connect(DB_NAME, timeout=10)
+    cursor = await conn.cursor()
+    await cursor.execute('''
         SELECT DISTINCT date(tanggal, 'localtime') as tgl
         FROM order_history
         WHERE telegram_id = ?
         ORDER BY tgl DESC
         LIMIT 5
     ''', (telegram_id,))
-    rows = cursor.fetchall()
-    conn.close()
+    rows = await cursor.fetchall()
+    await conn.close()
     return [r[0] for r in rows]
 
 
-def get_order_history_by_date(telegram_id: str, date_str: str) -> list:
+async def get_order_history_by_date(telegram_id: str, date_str: str) -> list:
     """
     Ambil semua order pada tanggal tertentu (semua akun).
     Return: list of (jam, username, total_maxi, payload_json, order_id, status, total_nominal)
     """
-    conn = sqlite3.connect(DB_NAME, timeout=10)
-    cursor = conn.cursor()
-    cursor.execute('''
+    conn = await aiosqlite.connect(DB_NAME, timeout=10)
+    cursor = await conn.cursor()
+    await cursor.execute('''
         SELECT
             time(tanggal, 'localtime')      as jam,
             username,
@@ -586,65 +587,65 @@ def get_order_history_by_date(telegram_id: str, date_str: str) -> list:
           AND date(tanggal, 'localtime') = ?
         ORDER BY tanggal ASC
     ''', (telegram_id, date_str))
-    rows = cursor.fetchall()
-    conn.close()
+    rows = await cursor.fetchall()
+    await conn.close()
     return rows
 
 
-def save_failed_order(telegram_id: str, username: str, total_maxi: int,
+async def save_failed_order(telegram_id: str, username: str, total_maxi: int,
                       payload_json: str, reason: str):
     """Simpan riwayat order GAGAL ke order_history."""
-    conn = sqlite3.connect(DB_NAME, timeout=10)
-    cursor = conn.cursor()
+    conn = await aiosqlite.connect(DB_NAME, timeout=10)
+    cursor = await conn.cursor()
     try:
-        cursor.execute('''
+        await cursor.execute('''
             INSERT INTO order_history
                 (telegram_id, username, total_maxi, payload_json, order_id, status, total_nominal)
             VALUES (?, ?, ?, ?, 'N/A', 'GAGAL', ?)
         ''', (telegram_id, username, total_maxi, payload_json, reason[:120]))
-        conn.commit()
+        await conn.commit()
     except Exception as e:
         logger.error(f"save_failed_order error: {e}")
     finally:
-        conn.close()
+        await conn.close()
 
 
-def get_order_history(telegram_id, username):
+async def get_order_history(telegram_id, username):
     """Legacy — ambil riwayat per akun, maks 20 entri terakhir."""
-    conn = sqlite3.connect(DB_NAME, timeout=10)
-    cursor = conn.cursor()
-    cursor.execute('''
+    conn = await aiosqlite.connect(DB_NAME, timeout=10)
+    cursor = await conn.cursor()
+    await cursor.execute('''
         SELECT datetime(tanggal, 'localtime'), total_maxi, payload_json,
                COALESCE(status, 'SUKSES') as status
         FROM order_history
         WHERE telegram_id=? AND username=?
         ORDER BY id DESC LIMIT 20
     ''', (telegram_id, username))
-    rows = cursor.fetchall()
-    conn.close()
+    rows = await cursor.fetchall()
+    await conn.close()
     return rows
 
 # ============================================================
 # GLOBAL SETTINGS
 # ============================================================
 
-def get_setting(key: str, default_value: str = "") -> str:
-    conn = sqlite3.connect(DB_NAME, timeout=10)
-    cursor = conn.cursor()
-    cursor.execute("SELECT value FROM settings WHERE key=?", (key,))
-    row = cursor.fetchone()
-    conn.close()
+async def get_setting(key: str, default_value: str = "") -> str:
+    conn = await aiosqlite.connect(DB_NAME, timeout=10)
+    cursor = await conn.cursor()
+    await cursor.execute("SELECT value FROM settings WHERE key=?", (key,))
+    row = await cursor.fetchone()
+    await conn.close()
     return row[0] if row else default_value
 
-def set_setting(key: str, value: str):
-    conn = sqlite3.connect(DB_NAME, timeout=10)
-    cursor = conn.cursor()
-    cursor.execute('''
+async def set_setting(key: str, value: str):
+    conn = await aiosqlite.connect(DB_NAME, timeout=10)
+    cursor = await conn.cursor()
+    await cursor.execute('''
         INSERT INTO settings (key, value) VALUES (?, ?)
         ON CONFLICT(key) DO UPDATE SET value=?
     ''', (key, value, value))
-    conn.commit()
-    conn.close()
+    await conn.commit()
+    await conn.close()
 
 
 if __name__ == "__main__":

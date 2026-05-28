@@ -1,7 +1,9 @@
 aiogram
-httpx
+httpx[http2]
 beautifulsoup4
 apscheduler
 pytz
 python-dotenv
 cryptography
+aiosqlite
+lxml

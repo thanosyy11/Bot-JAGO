@@ -91,7 +91,7 @@ async def eksekusi_dengan_jeda(engine, delay, username):
 
 async def job_pemanasan():
     logger.info("Warm Up...")
-    orders = get_all_pending_orders_multi(str(ADMIN_ID))
+    orders = await get_all_pending_orders_multi(str(ADMIN_ID))
 
     if not orders:
         await bot.send_message(
@@ -124,11 +124,11 @@ async def job_pemanasan():
             if await engine.login():
                 mesin_siaga[ADMIN_ID][username] = engine
                 berhasil_login += 1
-                set_engine_ready_status(str(ADMIN_ID), username, True)
+                await set_engine_ready_status(str(ADMIN_ID), username, True)
                 return True
             else:
                 gagal_login.append(username)
-                set_engine_ready_status(str(ADMIN_ID), username, False)
+                await set_engine_ready_status(str(ADMIN_ID), username, False)
                 await engine.close()
                 return False
         except Exception as e:
@@ -161,7 +161,7 @@ async def job_eksekusi():
 
     if not pasukan:
         logger.warning("⚠️ Memori kosong, memuat fallback dari database...")
-        orders = get_all_pending_orders_multi(str(ADMIN_ID))
+        orders = await get_all_pending_orders_multi(str(ADMIN_ID))
         if orders:
             mesin_siaga[ADMIN_ID] = {}
             for order in orders:
@@ -186,7 +186,7 @@ async def job_eksekusi():
         else:
             # Cek apakah ada engine yang ready (berarti tembus via cookie 06:00)
             for u in pasukan.keys():
-                if get_engine_ready_status(str(ADMIN_ID), u):
+                if await get_engine_ready_status(str(ADMIN_ID), u):
                     butuh_gedor = False
                     break
 
@@ -220,7 +220,7 @@ async def job_eksekusi():
         delay_total = 0.0
         for username, engine in pasukan.items():
             tasks.append(eksekusi_dengan_jeda(engine, delay_total, username))
-            delay_total += random.uniform(0.1, 0.3)
+            delay_total += random.uniform(0.01, 0.05)
 
         hasil_perang = await asyncio.gather(*tasks)
 
@@ -321,7 +321,7 @@ async def job_bersihkan_draft():
     agar tidak terbawa ke war berikutnya.
     """
     logger.info("Memulai cleanup draft otomatis...")
-    deleted = cleanup_all_pending_orders(str(ADMIN_ID))
+    deleted = await cleanup_all_pending_orders(str(ADMIN_ID))
     mesin_siaga.pop(ADMIN_ID, None)  # Bersihkan juga cache engine
 
     if deleted > 0:
@@ -362,11 +362,12 @@ async def job_health_check():
         logger.warning(f"Health check Gagal: {e}")
 
     # 2. Cek session setiap akun yang punya draf
-    orders = get_all_pending_orders_multi(str(ADMIN_ID))
+    orders = await get_all_pending_orders_multi(str(ADMIN_ID))
     session_lines = []
     for order in orders:
         username = order[1]
         engine = SiliwangiEngine(telegram_id=str(ADMIN_ID), username=username)
+        await engine.init_session()
         try:
             import httpx as _h
             resp2 = await engine.client.get("https://siliwangibolukukus.com/my-account/")
@@ -430,8 +431,8 @@ async def cmd_start(event, state: FSMContext = None):
     if state: await state.clear()
     
     user_id = str(event.from_user.id if isinstance(event, Message) else event.from_user.id)
-    drafts = get_all_drafts_overview(user_id)
-    current_user = get_current_user(user_id)
+    drafts = await get_all_drafts_overview(user_id)
+    current_user = await get_current_user(user_id)
 
     status_text = "🤖 *BOT JAGO — Dashboard*\n━━━━━━━━━━━━━━\n"
 
@@ -439,7 +440,7 @@ async def cmd_start(event, state: FSMContext = None):
         status_text += "❌ Belum ada akun terdaftar.\nKlik ⚙️ *Pengaturan* → *Akun Siliwangi* untuk mulai."
     else:
         for i, (username, is_active, has_draft, total_maxi, _, nickname) in enumerate(drafts, 1):
-            session_ok = get_session_status(user_id, username)
+            session_ok = await get_session_status(user_id, username)
             dn = _dn(username, nickname)
             s_icon = "🔑" if session_ok else "🚫"
             d_icon = "✅" if has_draft else "📝"
@@ -665,12 +666,12 @@ async def cb_force_warmup(callback: CallbackQuery):
 async def cb_war_panel(callback: CallbackQuery):
     await callback.answer()
     tid = str(callback.from_user.id)
-    drafts = get_all_drafts_overview(tid)
+    drafts = await get_all_drafts_overview(tid)
 
     status_lines = []
     for username, is_active, has_draft, total_maxi, _, nickname in drafts:
         dn = _dn(username, nickname)
-        session_ok = get_session_status(tid, username)
+        session_ok = await get_session_status(tid, username)
         if has_draft and session_ok:
             icon, ket = "✅", f"{total_maxi} box · Siap"
         elif has_draft and not session_ok:
@@ -696,8 +697,8 @@ async def cb_war_panel(callback: CallbackQuery):
 @router.callback_query(F.data == "menu_akun")
 async def cb_menu_akun(callback: CallbackQuery):
     tid = str(callback.from_user.id)
-    accounts = get_all_accounts_with_status(tid)
-    current = get_current_user(tid)
+    accounts = await get_all_accounts_with_status(tid)
+    current = await get_current_user(tid)
     keyboard = []
 
     if not accounts:
@@ -713,7 +714,7 @@ async def cb_menu_akun(callback: CallbackQuery):
             "━━━━━━━━━━━━━━\n"
             "🟢 Aktif · 🔑 Session · ✅ Ada draf\n\n"
         )
-        drafts_overview = get_all_drafts_overview(tid)
+        drafts_overview = await get_all_drafts_overview(tid)
         draft_map = {d[0]: d for d in drafts_overview}
         for acc, is_active, has_session, nickname in accounts:
             dn = _dn(acc, nickname)
@@ -738,9 +739,9 @@ async def cb_acc_detail(callback: CallbackQuery, state: FSMContext):
     """Halaman detail akun — tampilkan nickname, set aktif, edit alias, reset login, hapus."""
     tid = str(callback.from_user.id)
     target = callback.data.split(":", 1)[1]
-    current = get_current_user(tid)
-    has_session = get_session_status(tid, target)
-    nickname = get_account_nickname(tid, target)
+    current = await get_current_user(tid)
+    has_session = await get_session_status(tid, target)
+    nickname = await get_account_nickname(tid, target)
     dn = _dn(target, nickname)
 
     status_aktif = "🟢 Dipilih untuk input pesanan" if target == current else "⚫ Tidak dipilih"
@@ -783,7 +784,7 @@ async def cb_acc_detail(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("setacc:"))
 async def cb_setacc(callback: CallbackQuery, state: FSMContext):
     target_acc = callback.data.split(":", 1)[1]
-    set_active_account(str(callback.from_user.id), target_acc)
+    await set_active_account(str(callback.from_user.id), target_acc)
     await callback.answer(f"✅ Akun aktif: {target_acc[:30]}", show_alert=True)
     await cb_menu_akun(callback)
 
@@ -832,7 +833,7 @@ async def process_nickname(message: Message, state: FSMContext):
         return
     data = await state.get_data()
     target = data.get("edit_target", "")
-    update_account_nickname(str(message.from_user.id), target, nickname)
+    await update_account_nickname(str(message.from_user.id), target, nickname)
     await state.clear()
     btn = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔙 Detail Akun", callback_data=f"acc_detail:{target}")]
@@ -847,7 +848,7 @@ async def process_nickname(message: Message, state: FSMContext):
 async def cb_hapus_akun(callback: CallbackQuery):
     tid = str(callback.from_user.id)
     target = callback.data.split(":", 1)[1]
-    nickname = get_account_nickname(tid, target)
+    nickname = await get_account_nickname(tid, target)
     dn = _dn(target, nickname)
     teks = (
         f"⚠️ *KONFIRMASI HAPUS AKUN*\n\n"
@@ -872,13 +873,13 @@ async def cb_confirm_hapus_akun(callback: CallbackQuery):
     if ADMIN_ID in mesin_siaga and target in mesin_siaga[ADMIN_ID]:
         engine = mesin_siaga[ADMIN_ID].pop(target)
         await engine.close()
-    delete_account(tid, target)
+    await delete_account(tid, target)
     await callback.answer(f"✅ Akun {target[:30]} dihapus.", show_alert=True)
     await cb_menu_akun(callback)
 
 @router.callback_query(F.data == "add_new_acc")
 async def cb_add_new_acc(callback: CallbackQuery, state: FSMContext):
-    total = count_accounts(str(callback.from_user.id))
+    total = await count_accounts(str(callback.from_user.id))
     if total >= 2:
         await callback.answer(
             "⛔ Maksimal 2 akun. Hubungi admin untuk menambah slot.",
@@ -901,7 +902,7 @@ async def cb_siapkan_semua(callback: CallbackQuery):
     
     await callback.answer()
     tid = str(callback.from_user.id)
-    orders = get_all_pending_orders_multi(tid)
+    orders = await get_all_pending_orders_multi(tid)
 
     if not orders:
         await callback.message.edit_text(
@@ -976,7 +977,7 @@ async def process_password(message: Message, state: FSMContext):
         
     data = await state.get_data()
     try:
-        save_user_credentials(str(message.from_user.id), data['username'], message.text)
+        await save_user_credentials(str(message.from_user.id), data['username'], message.text)
     except RuntimeError as e:
         await message.answer(f"❌ **Gagal menyimpan akun:**\n{e}", parse_mode="Markdown")
         await state.clear()
@@ -998,7 +999,7 @@ async def cb_lihat_riwayat(callback: CallbackQuery):
     """Tampilkan 5 tanggal terbaru sebagai tombol pilihan."""
     await callback.answer()
     tid = str(callback.from_user.id)
-    dates = get_order_history_dates(tid)
+    dates = await get_order_history_dates(tid)
 
     if not dates:
         await callback.message.edit_text(
@@ -1039,7 +1040,7 @@ async def cb_riwayat_tanggal(callback: CallbackQuery):
     tid  = str(callback.from_user.id)
     date_str = callback.data.split(":", 1)[1]  # 'YYYY-MM-DD'
 
-    rows = get_order_history_by_date(tid, date_str)
+    rows = await get_order_history_by_date(tid, date_str)
 
     # Format judul tanggal
     bulan_id = ["", "Januari", "Februari", "Maret", "April", "Mei", "Juni",
@@ -1099,15 +1100,15 @@ async def cb_hapus_order(callback: CallbackQuery):
 
 @router.callback_query(F.data == "confirm_hapus")
 async def cb_confirm_hapus(callback: CallbackQuery):
-    delete_pending_order(str(callback.from_user.id))
+    await delete_pending_order(str(callback.from_user.id))
     btn = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Kembali", callback_data="menu_order")]])
     await callback.message.edit_text("🗑️ **Draft dihapus!**", reply_markup=btn, parse_mode="Markdown")
 
 @router.callback_query(F.data == "menu_order")
 async def cb_menu_order(callback: CallbackQuery):
     tid = str(callback.from_user.id)
-    overview = get_all_drafts_overview(tid)
-    current_user = get_current_user(tid)
+    overview = await get_all_drafts_overview(tid)
+    current_user = await get_current_user(tid)
 
     teks = (
         "📦 *INPUT PESANAN*\n"
@@ -1131,13 +1132,13 @@ async def cb_menu_order(callback: CallbackQuery):
 async def cb_order_acc(callback: CallbackQuery):
     target = callback.data.split(":", 1)[1]
     tid = str(callback.from_user.id)
-    current = get_current_user(tid)
+    current = await get_current_user(tid)
     
     # Set as active first if not active
     if target != current:
-        set_active_account(tid, target)
+        await set_active_account(tid, target)
     
-    pending = get_pending_order(tid)
+    pending = await get_pending_order(tid)
     
     teks = f"📝 **Kelola Draf: `{target}`**\n━━━━━━━━━━━━━━\n"
     if pending:
@@ -1158,7 +1159,7 @@ async def cb_order_acc(callback: CallbackQuery):
 
 @router.callback_query(F.data == "start_input_order")
 async def cb_start_input_order(callback: CallbackQuery, state: FSMContext):
-    current_user = get_current_user(str(callback.from_user.id))
+    current_user = await get_current_user(str(callback.from_user.id))
 
     template = (
         f"**Order untuk Akun: `{current_user}`**\n\n"
@@ -1207,7 +1208,7 @@ async def process_template(message: Message, state: FSMContext):
 
 async def _proses_input_order(message: Message, state: FSMContext, is_edit: bool = False):
     """Core logic parse + validasi + preview konfirmasi input pesanan."""
-    products_db = get_all_products_dict()
+    products_db = await get_all_products_dict()
     # Buat lookup case-insensitive
     products_db_lower = {k.lower(): (k, v) for k, v in products_db.items()}
     
@@ -1295,7 +1296,7 @@ async def _proses_input_order(message: Message, state: FSMContext, is_edit: bool
     await state.update_data(keranjang=keranjang, total_maxi=total_maxi, is_edit=is_edit)
 
     # Preview konfirmasi
-    current_user = get_current_user(str(message.from_user.id))
+    current_user = await get_current_user(str(message.from_user.id))
     preview_items = "\n".join(
         [f"  · {i['qty']}x {i['nama']} (T{i['tier']})" for i in keranjang]
     )
@@ -1328,8 +1329,8 @@ async def cb_confirm_simpan_order(callback: CallbackQuery, state: FSMContext):
         return
 
     # simpan_draft_order sudah atomik (delete lama + insert baru)
-    current_user = get_current_user(str(callback.from_user.id))
-    simpan_draft_order(str(callback.from_user.id), total_maxi, keranjang)
+    current_user = await get_current_user(str(callback.from_user.id))
+    await simpan_draft_order(str(callback.from_user.id), total_maxi, keranjang)
     await state.clear()
 
     btn = InlineKeyboardMarkup(inline_keyboard=[
@@ -1379,7 +1380,7 @@ async def cb_net_diag(callback: CallbackQuery):
         pass
 
     # 3. Cek session per akun
-    accounts = get_all_accounts_with_status(tid)
+    accounts = await get_all_accounts_with_status(tid)
     session_lines = []
     for acc, _, has_session, nickname in accounts:
         dn = _dn(acc, nickname)
@@ -1430,7 +1431,7 @@ async def cb_net_diag_reset_confirm(callback: CallbackQuery):
 @router.callback_query(F.data == "net_diag_reset_execute")
 async def cb_net_diag_reset_execute(callback: CallbackQuery):
     tid = str(callback.from_user.id)
-    accounts = get_all_accounts(tid)
+    accounts = await get_all_accounts(tid)
     for username, _ in accounts:
         clear_session_cookies(tid, username)
     mesin_siaga.pop(ADMIN_ID, None)
