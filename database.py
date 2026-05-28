@@ -500,7 +500,7 @@ async def get_all_drafts_overview(telegram_id: str) -> list:
         "SELECT username, is_active, COALESCE(nickname, '') FROM users WHERE telegram_id=? ORDER BY is_active DESC, username ASC",
         (telegram_id,)
     )
-    accounts = cursor.fetchall()
+    accounts = await cursor.fetchall()
 
     # Draf pending terbaru per akun
     await cursor.execute('''
@@ -514,7 +514,7 @@ async def get_all_drafts_overview(telegram_id: str) -> list:
         ) latest ON d.id = latest.max_id
         WHERE d.telegram_id = ?
     ''', (telegram_id, telegram_id))
-    drafts = {row[0]: (row[1], row[2]) for row in cursor.fetchall()}
+    drafts = {row[0]: (row[1], row[2]) for row in await cursor.fetchall()}
     await conn.close()
 
     result = []
