@@ -1081,7 +1081,7 @@ class SiliwangiEngine:
                     logger.info(f"🔖 [{self.username}] Order ID diekstrak: {self.order_id_woo}")
                     try:
                         nominal = await self._scrape_order_nominal(self.order_id_woo)
-                        self._mark_success(nominal)
+                        await self._mark_success(nominal)
                     except Exception as e:
                         logger.warning(f"⚠️ Gagal membersihkan draf setelah sukses: {e}")
                     return True
