@@ -135,6 +135,18 @@ def init_db():
         )
     ''')
 
+    # Tabel draft_history (Log historis semua draf pesanan)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS draft_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id TEXT,
+            username TEXT,
+            total_maxi INTEGER,
+            payload_json TEXT,
+            tanggal TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
     # Tabel engine_ready_status
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS engine_ready_status (
@@ -208,6 +220,10 @@ def init_db():
         VALUES (?, ?, ?, ?)
     ''', products)
 
+    # Cleanup history older than 5 days
+    cursor.execute("DELETE FROM order_history WHERE datetime(tanggal) < datetime('now', '-5 days')")
+    cursor.execute("DELETE FROM draft_history WHERE datetime(tanggal) < datetime('now', '-5 days')")
+
     conn.commit()
     conn.close()
     print("[OK] Database berhasil diinisialisasi & dimigrasi")
@@ -223,6 +239,47 @@ async def set_engine_ready_status(telegram_id: str, username: str, is_ready: boo
     ''', (telegram_id, username, int(is_ready), int(is_ready)))
     await conn.commit()
     await conn.close()
+
+
+async def get_order_history(telegram_id: str, username: str, limit=50) -> list:
+    conn = await aiosqlite.connect(DB_NAME, timeout=10)
+    cursor = await conn.cursor()
+    await cursor.execute(
+        "SELECT order_id, status, total_nominal, tanggal, payload_json FROM order_history WHERE telegram_id=? AND username=? ORDER BY tanggal DESC LIMIT ?",
+        (telegram_id, username, limit)
+    )
+    rows = await cursor.fetchall()
+    await conn.close()
+    return rows
+
+async def get_draft_history_dates(telegram_id: str) -> list:
+    """Ambil daftar tanggal unik dari riwayat DRAF (5 hari terakhir)."""
+    conn = await aiosqlite.connect(DB_NAME, timeout=10)
+    cursor = await conn.cursor()
+    await cursor.execute('''
+        SELECT DISTINCT date(tanggal) as tgl
+        FROM draft_history
+        WHERE telegram_id=?
+        ORDER BY tgl DESC
+        LIMIT 5
+    ''', (telegram_id,))
+    rows = await cursor.fetchall()
+    await conn.close()
+    return [row[0] for row in rows]
+
+async def get_draft_history_by_date(telegram_id: str, date_str: str) -> list:
+    """Ambil semua riwayat draf pada tanggal tertentu."""
+    conn = await aiosqlite.connect(DB_NAME, timeout=10)
+    cursor = await conn.cursor()
+    await cursor.execute('''
+        SELECT time(tanggal), username, total_maxi, payload_json
+        FROM draft_history
+        WHERE telegram_id=? AND date(tanggal)=?
+        ORDER BY tanggal DESC
+    ''', (telegram_id, date_str))
+    rows = await cursor.fetchall()
+    await conn.close()
+    return rows
 
 
 async def get_engine_ready_status(telegram_id: str, username: str) -> bool:
@@ -411,6 +468,13 @@ async def simpan_draft_order(telegram_id, total_maxi, keranjang):
         INSERT INTO draft_orders (telegram_id, username, total_maxi, payload_json)
         VALUES (?, ?, ?, ?)
     ''', (telegram_id, active_user, total_maxi, json.dumps(keranjang)))
+    
+    # Simpan juga ke log history
+    await cursor.execute('''
+        INSERT INTO draft_history (telegram_id, username, total_maxi, payload_json)
+        VALUES (?, ?, ?, ?)
+    ''', (telegram_id, active_user, total_maxi, json.dumps(keranjang)))
+    
     await conn.commit()
     await conn.close()
     return True

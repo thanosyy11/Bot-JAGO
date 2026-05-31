@@ -993,88 +993,75 @@ async def process_password(message: Message, state: FSMContext):
 
 @router.callback_query(F.data == "lihat_riwayat")
 async def cb_lihat_riwayat(callback: CallbackQuery):
-    """Tampilkan 5 tanggal terbaru sebagai tombol pilihan."""
+    """Menu Utama Riwayat."""
+    await callback.answer()
+    teks = "📜 **PILIH JENIS RIWAYAT**\n━━━━━━━━━━━━━━\nSilakan pilih riwayat yang ingin Anda lihat:"
+    keyboard = [
+        [InlineKeyboardButton(text="✅ Riwayat Checkout", callback_data="riwayat_checkout_dates")],
+        [InlineKeyboardButton(text="📝 Riwayat Input (Draf)", callback_data="riwayat_draft_dates")],
+        [InlineKeyboardButton(text="🔙 Kembali", callback_data="kembali_ke_menu")]
+    ]
+    await callback.message.edit_text(teks, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard), parse_mode="Markdown")
+
+@router.callback_query(F.data == "riwayat_checkout_dates")
+async def cb_riwayat_checkout_dates(callback: CallbackQuery):
     await callback.answer()
     tid = str(callback.from_user.id)
     dates = await get_order_history_dates(tid)
-
     if not dates:
         await callback.message.edit_text(
-            "📜 **RIWAYAT ORDER**\n━━━━━━━━━━━━━━\n"
-            "_(Belum ada riwayat order tersimpan.)_",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔙 Kembali", callback_data="kembali_ke_menu")]
-            ]),
+            "📜 **RIWAYAT CHECKOUT**\n━━━━━━━━━━━━━━\n_(Belum ada riwayat tersimpan.)_",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Kembali", callback_data="lihat_riwayat")]]),
             parse_mode="Markdown"
         )
         return
-
     keyboard = []
     hari_id = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
-    bulan_id = ["", "Jan", "Feb", "Mar", "Apr", "Mei", "Jun",
-                "Jul", "Agu", "Sep", "Okt", "Nov", "Des"]
+    bulan_id = ["", "Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"]
     for d in dates:
         try:
             dt = datetime.strptime(d, "%Y-%m-%d")
             label = f"📅 {dt.day} {bulan_id[dt.month]} {dt.year} ({hari_id[dt.weekday()]})"
         except Exception:
-            label = f"📅 {d}"
-        keyboard.append([InlineKeyboardButton(text=label, callback_data=f"riwayat_tgl:{d}")])
+            label = d
+        keyboard.append([InlineKeyboardButton(text=label, callback_data=f"riwayat_checkout:{d}")])
+    keyboard.append([InlineKeyboardButton(text="🔙 Kembali", callback_data="lihat_riwayat")])
+    await callback.message.edit_text("📜 **PILIH TANGGAL CHECKOUT**\n━━━━━━━━━━━━━━", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard), parse_mode="Markdown")
 
-    keyboard.append([InlineKeyboardButton(text="🔙 Kembali ke Menu", callback_data="kembali_ke_menu")])
-    await callback.message.edit_text(
-        "📜 **RIWAYAT ORDER**\n━━━━━━━━━━━━━━\n"
-        "Pilih untuk liat detail order:\n",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard),
-        parse_mode="Markdown"
-    )
-
-
-@router.callback_query(F.data.startswith("riwayat_tgl:"))
-async def cb_riwayat_tanggal(callback: CallbackQuery):
-    """Tampilkan detail semua order pada tanggal yang dipilih."""
+@router.callback_query(F.data.startswith("riwayat_checkout:"))
+async def cb_riwayat_checkout(callback: CallbackQuery):
     await callback.answer()
     tid  = str(callback.from_user.id)
-    date_str = callback.data.split(":", 1)[1]  # 'YYYY-MM-DD'
-
+    date_str = callback.data.split(":", 1)[1]
     rows = await get_order_history_by_date(tid, date_str)
-
-    # Format judul tanggal
-    bulan_id = ["", "Januari", "Februari", "Maret", "April", "Mei", "Juni",
-                "Juli", "Agustus", "September", "Oktober", "November", "Desember"]
+    
+    bulan_id = ["", "Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"]
     try:
         dt = datetime.strptime(date_str, "%Y-%m-%d")
         judul = f"{dt.day} {bulan_id[dt.month]} {dt.year}"
     except Exception:
         judul = date_str
 
-    teks = f"📋 **RIWAYAT {judul.upper()}**\n━━━━━━━━━━━━━━━━━━\n\n"
-
+    teks = f"<b>📋 RIWAYAT CHECKOUT {judul.upper()}</b>\n━━━━━━━━━━━━━━━━━━\n\n"
     if not rows:
-        teks += "_(Tidak ada data untuk tanggal ini.)_"
+        teks += "<i>(Tidak ada data untuk tanggal ini.)</i>"
     else:
         for jam, username, total_maxi, payload_json, order_id, status, total_nominal in rows:
             status_icon = "✅" if status == "SUKSES" else "❌"
-            teks += f"{status_icon} **{jam[:5]} WIB** — `{username[:28]}`\n"
+            teks += f"{status_icon} <b>{jam[:5]} WIB</b> — <code>{username[:28]}</code>\n"
             if order_id and order_id not in ('N/A', 'UNKNOWN'):
-                teks += f"   🔖 Order ID: `#{order_id}`\n"
+                teks += f"   🔖 Order ID: <code>#{order_id}</code>\n"
             if total_nominal:
-                teks += f"   💰 Total: **{total_nominal}**\n"
-            teks += f"   📦 MAXI: **{total_maxi} box**\n"
-            # Uraian item
+                teks += f"   💰 Total: <b>{total_nominal}</b>\n"
+            teks += f"   📦 MAXI: <b>{total_maxi} box</b>\n"
             try:
                 keranjang = json.loads(payload_json)
-                uraian = ", ".join(
-                    [f"{i['qty']}x {i['nama']}" for i in keranjang]
-                )
-                # Potong jika terlalu panjang
-                if len(uraian) > 200:
-                    uraian = uraian[:197] + "..."
-                teks += f"   🛒 {uraian}\n"
+                for i, item in enumerate(keranjang, 1):
+                    teks += f"   {i}. {item['qty']}x {item['nama']}\n"
             except Exception:
-                teks += "   🛒 _(data tidak terbaca)_\n"
+                teks += "   🛒 <i>(data tidak terbaca)</i>\n"
             if status == "GAGAL" and total_nominal:
-                teks += f"   ⚠️ Alasan: _{total_nominal}_\n"
+                teks += f"   ⚠️ Alasan: <i>{total_nominal}</i>\n"
             teks += "\n"
 
     btn = InlineKeyboardMarkup(inline_keyboard=[
@@ -1434,7 +1421,6 @@ async def cb_net_diag_reset_execute(callback: CallbackQuery):
     mesin_siaga.pop(ADMIN_ID, None)
     await callback.answer("✅ Semua session berhasil direset!", show_alert=True)
     await cb_net_diag(callback)
-
 
 async def main():
 
