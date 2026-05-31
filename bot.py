@@ -96,10 +96,10 @@ async def job_pemanasan():
     if not orders:
         await bot.send_message(
             ADMIN_ID,
-            "Tidak ada draf pesanan hari ini. Bot tidak aktif.",
+            "Tidak ada draf pesanan hari ini. Bot Nonaktif.",
             reply_markup=get_war_panel_button()
         )
-        logger.info("[Libur] Tidak ada draf pesanan.")
+        logger.info("[Nonaktif] Tidak ada draf pesanan.")
         return
 
     # Notifikasi warm-up dimulai — lengkap
@@ -181,7 +181,7 @@ async def job_eksekusi():
         import httpx
         # Cek apakah butuh Gedor Pintu
         butuh_gedor = True
-        if get_setting("kode_akses", ""):
+        if await get_setting("kode_akses", ""):
             butuh_gedor = False
         else:
             # Cek apakah ada engine yang ready (berarti tembus via cookie 06:00)
@@ -412,7 +412,7 @@ def get_main_menu_keyboard() -> InlineKeyboardMarkup:
 @router.message(Command("help"))
 async def cmd_help(message: Message):
     teks = (
-        "🤖 **Bot JAGO — Panduan Cepat**\n\n"
+        "**Bot JAGO — Panduan Cepat**\n\n"
         "1. **Kelola Akun:** Tambah & login akun Siliwangi.\n"
         "2. **Susun Pesanan:** Input draf item yang akan di-war.\n"
         "3. **Siapkan War:** Cek sesi login & kesiapan draf.\n\n"
@@ -434,7 +434,7 @@ async def cmd_start(event, state: FSMContext = None):
     drafts = await get_all_drafts_overview(user_id)
     current_user = await get_current_user(user_id)
 
-    status_text = "🤖 *BOT JAGO — Dashboard*\n━━━━━━━━━━━━━━\n"
+    status_text = "*BOT JAGO — Dashboard*\n━━━━━━━━━━━━━━\n"
 
     if not drafts:
         status_text += "❌ Belum ada akun terdaftar.\nKlik ⚙️ *Pengaturan* → *Akun Siliwangi* untuk mulai."
@@ -447,9 +447,6 @@ async def cmd_start(event, state: FSMContext = None):
             active_mark = " 🟢" if username == current_user else ""
             status_text += f"{i}. *{dn}*{active_mark}\n"
             status_text += f"   {s_icon}{d_icon}  {f'**{total_maxi} Box**' if has_draft else '_Belum ada draf_'}\n"
-
-    status_text += "\n⏰ _07:55 Warmup · 08:00 War · 09:00 Cleanup_"
-
     if isinstance(event, Message):
         await event.answer(status_text, reply_markup=get_main_menu_keyboard(), parse_mode="Markdown")
     else:
@@ -462,7 +459,7 @@ async def cmd_start(event, state: FSMContext = None):
 TUTORIAL_PAGES = [
     # Halaman 1 — Overview
     (
-        " **TUTORIAL BOT JAGO** — Hal. 1/7\n"
+        " **TUTORIAL** — Hal. 1/7\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         " **Apa itu Bot JAGO?**\n\n"
         "Bot JAGO adalah bot Telegram untuk otomasi order WooCommerce.\n\n"
@@ -620,7 +617,7 @@ async def cb_menu_pengaturan(callback: CallbackQuery):
 @router.callback_query(F.data == "menu_kode_akses")
 async def cb_menu_kode_akses(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    current_code = get_setting("kode_akses", "")
+    current_code = await get_setting("kode_akses", "")
     txt_code = f"`{current_code}`" if current_code else "_(belum diatur)_"
     teks = (
         "🔑 *KODE AKSES WAR*\n"
@@ -641,7 +638,7 @@ async def process_kode_akses(message: Message, state: FSMContext):
         await message.answer("Silakan ketik kode akses (tanpa awalan `/`):")
         return
     kode = message.text.strip()
-    set_setting("kode_akses", kode)
+    await set_setting("kode_akses", kode)
     await state.clear()
     
     teks = (
@@ -793,7 +790,7 @@ async def cb_setacc(callback: CallbackQuery, state: FSMContext):
 async def cb_force_relogin(callback: CallbackQuery):
     tid = str(callback.from_user.id)
     target = callback.data.split(":", 1)[1]
-    clear_session_cookies(tid, target)
+    await clear_session_cookies(tid, target)
     if ADMIN_ID in mesin_siaga and target in mesin_siaga[ADMIN_ID]:
         engine = mesin_siaga[ADMIN_ID].pop(target)
         await engine.close()
@@ -811,7 +808,7 @@ async def cb_edit_nickname(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
         f"✏️ *Ubah Nama Alias*\n\n"
         f"Akun: `{target}`\n\n"
-        f"Ketik nama alias yang mudah diingat.\n"
+        f"Ketik nama alias.\n"
         f"_Ketik /batal untuk membatalkan._",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🔙 Batal", callback_data=f"acc_detail:{target}")]
@@ -829,7 +826,7 @@ async def process_nickname(message: Message, state: FSMContext):
         return
     nickname = message.text.strip()
     if len(nickname) > 30:
-        await message.answer("⚠️ Nama alias maksimal 30 karakter. Coba lagi:")
+        await message.answer("⚠️ Maksimal 30 karakter. Coba lagi:")
         return
     data = await state.get_data()
     target = data.get("edit_target", "")
@@ -1433,7 +1430,7 @@ async def cb_net_diag_reset_execute(callback: CallbackQuery):
     tid = str(callback.from_user.id)
     accounts = await get_all_accounts(tid)
     for username, _ in accounts:
-        clear_session_cookies(tid, username)
+        await clear_session_cookies(tid, username)
     mesin_siaga.pop(ADMIN_ID, None)
     await callback.answer("✅ Semua session berhasil direset!", show_alert=True)
     await cb_net_diag(callback)

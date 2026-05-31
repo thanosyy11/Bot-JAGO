@@ -318,7 +318,7 @@ async def clear_session_cookies(telegram_id: str, username: str):
 
 async def get_session_status(telegram_id: str, username: str) -> bool:
     """Cek apakah akun punya session cookies tersimpan."""
-    cookies = load_session_cookies(telegram_id, username)
+    cookies = await load_session_cookies(telegram_id, username)
     return bool(cookies)
 
 async def get_all_accounts_with_status(telegram_id: str) -> list:
