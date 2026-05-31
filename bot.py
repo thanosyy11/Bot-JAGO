@@ -1073,7 +1073,74 @@ async def cb_riwayat_checkout(callback: CallbackQuery):
     if len(teks) > 4000:
         teks = teks[:3997] + "..."
 
-    await callback.message.edit_text(teks, reply_markup=btn, parse_mode="Markdown")
+    await callback.message.edit_text(teks, reply_markup=btn, parse_mode="HTML")
+
+
+@router.callback_query(F.data == "riwayat_draft_dates")
+async def cb_riwayat_draft_dates(callback: CallbackQuery):
+    await callback.answer()
+    tid = str(callback.from_user.id)
+    from database import get_draft_history_dates
+    dates = await get_draft_history_dates(tid)
+    if not dates:
+        await callback.message.edit_text(
+            "📝 <b>RIWAYAT INPUT DRAF</b>\n━━━━━━━━━━━━━━\n<i>Belum ada riwayat draf tersimpan.\nRiwayat tersimpan otomatis saat kamu mengisi draf pesanan.</i>",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Kembali", callback_data="lihat_riwayat")]]),
+            parse_mode="HTML"
+        )
+        return
+    keyboard = []
+    hari_id = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
+    bulan_id = ["", "Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"]
+    for d in dates:
+        try:
+            dt = datetime.strptime(d, "%Y-%m-%d")
+            label = f"📅 {dt.day} {bulan_id[dt.month]} {dt.year} ({hari_id[dt.weekday()]})"
+        except Exception:
+            label = d
+        keyboard.append([InlineKeyboardButton(text=label, callback_data=f"riwayat_draft:{d}")])
+    keyboard.append([InlineKeyboardButton(text="🔙 Kembali", callback_data="lihat_riwayat")])
+    await callback.message.edit_text(
+        "📝 <b>PILIH TANGGAL DRAF</b>\n━━━━━━━━━━━━━━",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard),
+        parse_mode="HTML"
+    )
+
+@router.callback_query(F.data.startswith("riwayat_draft:"))
+async def cb_riwayat_draft(callback: CallbackQuery):
+    await callback.answer()
+    tid = str(callback.from_user.id)
+    date_str = callback.data.split(":", 1)[1]
+    from database import get_draft_history_by_date
+    rows = await get_draft_history_by_date(tid, date_str)
+    bulan_id = ["", "Januari", "Februari", "Maret", "April", "Mei", "Juni",
+                "Juli", "Agustus", "September", "Oktober", "November", "Desember"]
+    try:
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        judul = f"{dt.day} {bulan_id[dt.month]} {dt.year}"
+    except Exception:
+        judul = date_str
+    teks = f"📝 <b>RIWAYAT INPUT DRAF {judul.upper()}</b>\n━━━━━━━━━━━━━━━━━━\n\n"
+    if not rows:
+        teks += "<i>(Tidak ada data untuk tanggal ini.)</i>"
+    else:
+        for jam, username, total_maxi, payload_json in rows:
+            teks += f"🕒 <b>{jam[:5]} WIB</b> — <code>{username}</code>\n"
+            teks += f"   📦 Total: <b>{total_maxi} Box MAXI</b>\n"
+            try:
+                keranjang = json.loads(payload_json)
+                for i, item in enumerate(keranjang, 1):
+                    teks += f"   {i}. {item['qty']}x {item['nama']}\n"
+            except Exception:
+                teks += "   <i>(data tidak terbaca)</i>\n"
+            teks += "\n"
+    btn = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 Kembali ke Tanggal", callback_data="riwayat_draft_dates")],
+        [InlineKeyboardButton(text="🏠 Menu Utama", callback_data="kembali_ke_menu")]
+    ])
+    if len(teks) > 4000:
+        teks = teks[:3997] + "..."
+    await callback.message.edit_text(teks, reply_markup=btn, parse_mode="HTML")
 
 @router.callback_query(F.data == "hapus_order")
 async def cb_hapus_order(callback: CallbackQuery):
