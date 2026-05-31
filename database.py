@@ -397,7 +397,7 @@ async def simpan_draft_order(telegram_id, total_maxi, keranjang):
     Simpan draf pesanan untuk akun aktif.
     Selalu REPLACE — 1 akun hanya boleh punya 1 draf PENDING.
     """
-    active_user = get_current_user(telegram_id)
+    active_user = await get_current_user(telegram_id)
     if not active_user:
         return False
     conn = await aiosqlite.connect(DB_NAME, timeout=10)
@@ -417,7 +417,7 @@ async def simpan_draft_order(telegram_id, total_maxi, keranjang):
 
 async def get_pending_order(telegram_id):
     """Ambil draf PENDING terbaru akun aktif, beserta info tanggalnya."""
-    active_user = get_current_user(telegram_id)
+    active_user = await get_current_user(telegram_id)
     if not active_user:
         return None
     conn = await aiosqlite.connect(DB_NAME, timeout=10)
@@ -434,7 +434,7 @@ async def get_pending_order(telegram_id):
     return row  # (id, total_maxi, payload_json, tgl_buat)
 
 async def delete_pending_order(telegram_id):
-    active_user = get_current_user(telegram_id)
+    active_user = await get_current_user(telegram_id)
     if not active_user:
         return
     conn = await aiosqlite.connect(DB_NAME, timeout=10)
