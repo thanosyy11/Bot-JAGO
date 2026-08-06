@@ -57,8 +57,6 @@ Generate `ENCRYPTION_KEY`:
 python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-> ⚠️ **Penting:** `ENCRYPTION_KEY` harus **sama persis** antara mesin lokal dan LXC jika kamu memindahkan database. Beda key = password tidak bisa terbaca.
-
 ### 3. Inisialisasi Database
 ```bash
 python database.py
@@ -74,6 +72,8 @@ python bot.py
 ## Deployment Permanen dengan systemd
 
 ```bash
+id -u botjago >/dev/null 2>&1 || sudo useradd --system --home /opt/Bot-JAGO --shell /usr/sbin/nologin botjago
+sudo chown -R botjago:botjago /opt/Bot-JAGO
 sudo cp bot-jago.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable bot-jago
@@ -82,41 +82,6 @@ sudo systemctl start bot-jago
 # Cek status
 sudo systemctl status bot-jago
 ```
-
-> Sesuaikan path di `bot-jago.service` jika direktori instalasi berbeda dari `/opt/Bot-JAGO`.
-
----
-
-## Update dari GitHub
-
-```bash
-cd
-git pull
-source .emyu/bin/activate
-pip install -r requirements.txt
-python database.py
-sudo systemctl restart bot-jago
-```
-
----
-
-## Alur Kerja Harian Admin
-
-```
-21:00  Buka bot → Input pesanan (per akun, via template)
-07:55  [Otomatis] Warm-up & login semua akun
-08:00  [Otomatis] War — add to cart & checkout
-08:00+ Terima laporan hasil di Telegram
-09:00  [Otomatis] Cleanup draft sisa
-```
-
----
-
-## Kompatibilitas
-
-Bot ini dirancang untuk bekerja dengan toko berbasis **WooCommerce** yang menggunakan tema **Flatsome** dan metode pembayaran **COD/Cheque**. Endpoint yang digunakan mengikuti standar WooCommerce AJAX (`?wc-ajax=`).
-
----
 
 ## File Penting
 

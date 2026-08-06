@@ -27,7 +27,7 @@ from database import (
 )
 from engine import SiliwangiEngine, CloudflareBlockException
 
-logging.basicConfig(filename='siliwangi_error.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - [BOT] %(message)s')
+logging.basicConfig(filename='siliwangi_error.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - [%(name)s] %(message)s')
 logger = logging.getLogger(__name__)
 
 # Load .env explicitly from the same directory as this script
@@ -156,7 +156,9 @@ async def job_pemanasan():
 
 
 async def job_eksekusi():
-    logger.info("Mengecek jadwal...")
+    logger.info("🔥 WAKTUNYA WAR! Mengeksekusi order...")
+    # RECOVERY STALE SESSIONS SEBELUM WAR
+    await recover_stale_running_orders()
     pasukan = mesin_siaga.get(ADMIN_ID, {})
 
     if not pasukan:
@@ -321,6 +323,7 @@ async def job_bersihkan_draft():
     agar tidak terbawa ke war berikutnya.
     """
     logger.info("Memulai cleanup draft otomatis...")
+    await recover_stale_running_orders()
     deleted = await cleanup_all_pending_orders(str(ADMIN_ID))
     mesin_siaga.pop(ADMIN_ID, None)  # Bersihkan juga cache engine
 
@@ -829,7 +832,7 @@ async def cb_setacc(callback: CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(F.data.startswith("force_relogin:"))
-async def cb_force_relogin(callback: CallbackQuery):
+async def cb_force_relogin(callback: CallbackQuery, state: FSMContext):
     tid = str(callback.from_user.id)
     target = callback.data.split(":", 1)[1]
     await clear_session_cookies(tid, target)

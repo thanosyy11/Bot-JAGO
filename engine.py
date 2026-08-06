@@ -19,11 +19,6 @@ from database import (
     get_setting
 )
 
-logging.basicConfig(
-    filename='siliwangi_error.log',
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - [ENGINE] %(message)s'
-)
 logger = logging.getLogger(__name__)
 
 DB_NAME = "siliwangi_bot.db"
@@ -718,6 +713,52 @@ class SiliwangiEngine:
     # AMBIL NONCE CHECKOUT & SECURITY
     # ------------------------------------------------------------------
 
+    async def _fallback_get_nonce_with_playwright(self):
+        """Fallback menggunakan Headless Browser jika scraping biasa gagal."""
+        logger.warning(f"🔄 [{self.username}] Mencoba mengambil nonce dengan Playwright...")
+        try:
+            from playwright.async_api import async_playwright
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                context = await browser.new_context(user_agent=self.headers.get('User-Agent', 'Mozilla/5.0'))
+                
+                # Transfer cookies dari httpx ke playwright
+                playwright_cookies = []
+                for name, value in self.client.cookies.items():
+                    playwright_cookies.append({
+                        "name": name,
+                        "value": value,
+                        "domain": "siliwangibolukukus.com",
+                        "path": "/"
+                    })
+                if playwright_cookies:
+                    await context.add_cookies(playwright_cookies)
+                
+                page = await context.new_page()
+                await page.goto("https://siliwangibolukukus.com/checkout/", wait_until="networkidle", timeout=30000)
+                
+                html_content = await page.content()
+                
+                # Ekstrak nonce lagi dari html_content
+                soup = BeautifulSoup(html_content, 'lxml')
+                nonce_field = soup.find('input', {'name': 'woocommerce-process-checkout-nonce'})
+                if nonce_field:
+                    self.checkout_nonce = nonce_field.get('value')
+                    logger.info(f"✅ [{self.username}] Playwright berhasil mendapatkan checkout nonce.")
+                
+                self.security_nonce = self._extract_security_nonce(html_content)
+                if self.security_nonce:
+                    logger.info(f"🔐 [{self.username}] Playwright berhasil mendapatkan security nonce.")
+                    
+                await browser.close()
+                return bool(self.checkout_nonce)
+        except ImportError:
+            logger.error("Playwright belum diinstall. Gunakan: pip install playwright && playwright install chromium")
+            return False
+        except Exception as e:
+            logger.error(f"❌ [{self.username}] Playwright fallback gagal: {e}")
+            return False
+
     async def get_checkout_nonce(self):
         """
         Mengambil dua nonce dari halaman checkout.
@@ -757,10 +798,19 @@ class SiliwangiEngine:
             else:
                 logger.error(f"Gagal mendapatkan checkout nonce [{self.username}]")
                 self._simpan_snapshot_html(res.text, "NoNonce_Checkout")
+                
+                # Fallback ke Playwright
+                if await self._fallback_get_nonce_with_playwright():
+                    return True
                 return False
 
             # Nonce 2: security nonce untuk update_order_review
             self.security_nonce = self._extract_security_nonce(res.text)
+            if not self.security_nonce:
+                # Coba ambil via playwright juga jika security nonce ga dapet
+                logger.warning(f"⚠️ [{self.username}] Security nonce tidak ditemukan, mencoba fallback Playwright...")
+                await self._fallback_get_nonce_with_playwright()
+                
             if self.security_nonce:
                 logger.info(f"🔐 [{self.username}] Security nonce OK: {self.security_nonce[:8]}...")
             else:
@@ -925,6 +975,7 @@ class SiliwangiEngine:
 
         if not await self._validate_kelipatan(keranjang):
             logger.error(f"🛑 [{self.username}] Draf ditolak sebelum masuk keranjang.")
+            await self._mark_failed("Validasi kelipatan gagal")
             return False
 
         await self.clear_cart()
@@ -1029,7 +1080,17 @@ class SiliwangiEngine:
             base_payload['h_deliverydate']                     = str_besok_h
             base_payload['e_deliverydate']                     = str_besok_e
             base_payload['orddd_min_date_set']                 = str_besok_h
-            base_payload['shipping_method[0]']                 = 'flat_rate:67'
+            
+            # Scrape dinamis shipping method (Fallback ke flat_rate:67 jika gagal)
+            dynamic_shipping = 'flat_rate:67'
+            shipping_inputs = soup.find_all('input', {'name': 'shipping_method[0]'})
+            for s_inp in shipping_inputs:
+                val = s_inp.get('value', '')
+                if 'flat_rate' in val:
+                    dynamic_shipping = val
+                    logger.info(f"🚚 [{self.username}] Ditemukan shipping dinamis: {dynamic_shipping}")
+                    break
+            base_payload['shipping_method[0]'] = dynamic_shipping
             base_payload['orddd_lite_current_hour']            = sekarang.strftime("%H")
             base_payload['orddd_lite_current_minute']          = sekarang.strftime("%M")
             base_payload['orddd_lite_current_day']             = str_sekarang_h
@@ -1162,25 +1223,14 @@ class SiliwangiEngine:
             await conn.close()
 
     async def _mark_failed(self, reason: str):
-        """Mencatat order gagal ke database agar masuk riwayat."""
-        if not self._draft_payload_json:
-            return  # Belum ada draft yang diproses, jangan simpan
-        conn = await aiosqlite.connect(DB_NAME, timeout=10)
-        cursor = await conn.cursor()
+        """Ubah status draft menjadi FAILED dan catat alasan."""
         try:
-            await cursor.execute('''
-                INSERT INTO order_history
-                    (telegram_id, username, total_maxi, payload_json,
-                     order_id, status, total_nominal)
-                VALUES (?, ?, ?, ?, 'N/A', 'GAGAL', ?)
-            ''', (self.telegram_id, self.username, self._draft_total_maxi,
-                  self._draft_payload_json, reason[:120]))
-            await conn.commit()
-            logger.info(f"📚 [{self.username}] Riwayat GAGAL tersimpan: {reason[:60]}")
+            from database import mark_order_failed
+            await mark_order_failed(self.telegram_id, self.username)
+            self._step("❌", "GAGAL", reason)
+            logger.error(f"❌ [{self.username}] Order GAGAL: {reason}. Status dikembalikan ke FAILED.")
         except Exception as e:
-            logger.error(f"❌ [{self.username}] _mark_failed error: {e}")
-        finally:
-            await conn.close()
+            logger.error(f"Error _mark_failed: {e}")
 
     async def _scrape_order_nominal(self, order_id_woo: str) -> str:
         """Scrape total nominal dari halaman order-received setelah checkout sukses."""

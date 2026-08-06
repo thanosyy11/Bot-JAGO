@@ -6,11 +6,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
+User=botjago
+Group=botjago
 WorkingDirectory=/opt/Bot-JAGO
 
 # Gunakan Python dari virtual environment
 ExecStart=/opt/Bot-JAGO/.emyu/bin/python /opt/Bot-JAGO/bot.py
+Environment=PYTHONUNBUFFERED=1
 
 # Restart otomatis jika bot crash, dengan jeda 10 detik
 Restart=always
@@ -22,6 +24,9 @@ StandardError=append:/var/log/bot-jago.log
 
 # Batas resource
 TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
