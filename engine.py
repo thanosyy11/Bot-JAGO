@@ -1,9 +1,9 @@
 import asyncio
 import re
 import urllib.parse
+import uuid
 import httpx
 from bs4 import BeautifulSoup
-import sqlite3
 import aiosqlite
 import json
 from datetime import datetime, timedelta
@@ -12,17 +12,19 @@ import logging
 import os
 
 from database import (
+    DB_NAME,
+    claim_draft_order,
     decrypt_password,
     load_session_cookies,
+    mark_order_failed,
+    mark_order_success,
+    mark_order_unknown,
     save_session_cookies,
     clear_session_cookies,
     get_setting
 )
 
 logger = logging.getLogger(__name__)
-
-DB_NAME = "siliwangi_bot.db"
-
 
 class CloudflareBlockException(Exception):
     pass
@@ -38,6 +40,13 @@ class SiliwangiEngine:
         self.order_id_woo = "UNKNOWN"
         self.step_log = []
         self.substitusi_log = []  # Varian habis/disubstitusi saat war
+
+        # Tracking untuk _mark_failed / _mark_success
+        self._attempt_id = None        # UUID unik per eksekusi war
+        self._draft_payload_json = None
+        self._draft_total_maxi   = 0
+        self.shipping_method = 'flat_rate:67'  # Default; akan di-scrape dinamis
+        self._finalized_status = None
 
         # Session recovery tracking
         self.last_session_check_at = None
@@ -95,13 +104,14 @@ class SiliwangiEngine:
             logger.error(f"Gagal menyimpan snapshot HTML: {e}")
 
     async def _safe_request(self, method, url, max_retries=4, **kwargs):
+        request_kwargs = dict(kwargs)
+        follow_redir = request_kwargs.pop('follow_redirects', True)
         for attempt in range(1, max_retries + 1):
             try:
-                follow_redir = kwargs.pop('follow_redirects', True)
                 if method.upper() == 'GET':
-                    res = await self.client.get(url, follow_redirects=follow_redir, **kwargs)
+                    res = await self.client.get(url, follow_redirects=follow_redir, **request_kwargs)
                 else:
-                    res = await self.client.post(url, follow_redirects=follow_redir, **kwargs)
+                    res = await self.client.post(url, follow_redirects=follow_redir, **request_kwargs)
 
                 # Cek Cloudflare
                 if res.headers.get('cf-mitigated') or "Just a moment" in res.text[:300] or "Checking your browser" in res.text[:300]:
@@ -113,7 +123,10 @@ class SiliwangiEngine:
                     raise CloudflareBlockException("Diblokir Server (403).")
 
                 if res.status_code == 429:
-                    retry_after = int(res.headers.get("Retry-After", 5))
+                    try:
+                        retry_after = int(res.headers.get("Retry-After", 5))
+                    except (TypeError, ValueError):
+                        retry_after = 5
                     logger.warning(f"⚠️ [{self.username}] Rate limited (429). Tunggu {retry_after} detik.")
                     await asyncio.sleep(retry_after)
                     continue
@@ -891,11 +904,12 @@ class SiliwangiEngine:
 
         # Bangun post_data (URL-encoded dari form fields checkout)
         post_data_str = urllib.parse.urlencode(base_payload)
+        shipping_method = base_payload.get("shipping_method[0]", self.shipping_method)
 
         review_payload = {
             "security":          self.security_nonce,
             "payment_method":    "cheque",
-            "shipping_method[0]": "flat_rate:67",
+            "shipping_method[0]": shipping_method,
             "has_full_address":  "true",
             "post_data":         post_data_str,
         }
@@ -940,10 +954,15 @@ class SiliwangiEngine:
         self.step_log = []
         self.substitusi_log = []
         self.reconnect_attempt = 0
+        self.order_id = None
         self.order_id_woo = "UNKNOWN"
         self._draft_payload_json = None
         self._draft_total_maxi   = 0
+        self._attempt_id = str(uuid.uuid4())  # ID unik per eksekusi war
+        self.shipping_method = 'flat_rate:67'  # Reset ke default, akan di-scrape ulang
+        self._finalized_status = None
         self._step("🔑", "Memulai", "WAR")
+
 
         logger.info(f"🔑 [{self.username}] Mengamankan sesi login...")
         if not await self.login():
@@ -967,11 +986,24 @@ class SiliwangiEngine:
             logger.error(f"🛑 [{self.username}] Draf KOSONG dari database saat eksekusi!")
             return False
 
-        self.order_id, payload_json, total_maxi_draft = row
+        draft_id, payload_json, total_maxi_draft = row
+        if not await claim_draft_order(draft_id, self.telegram_id, self.username, self._attempt_id):
+            self._step("⚠️", "Draft", "Sudah diproses worker lain")
+            logger.warning(
+                f"⚠️ [{self.username}] Draft ID {draft_id} tidak bisa di-claim; status sudah berubah."
+            )
+            return False
+
+        self.order_id = draft_id
         # Simpan untuk _mark_failed
         self._draft_payload_json = payload_json
         self._draft_total_maxi   = total_maxi_draft or 0
-        keranjang = json.loads(payload_json)
+        try:
+            keranjang = json.loads(payload_json)
+        except (TypeError, json.JSONDecodeError) as e:
+            logger.error(f"🛑 [{self.username}] Payload draft tidak valid: {e}")
+            await self._mark_failed("Payload draft tidak valid")
+            return False
 
         if not await self._validate_kelipatan(keranjang):
             logger.error(f"🛑 [{self.username}] Draf ditolak sebelum masuk keranjang.")
@@ -1011,7 +1043,7 @@ class SiliwangiEngine:
         )
 
         result = await self._process_checkout()
-        if not result:
+        if not result and not self._finalized_status:
             # Ambil alasan dari step_log terakhir yang error
             err_lines = [l for l in self.step_log if any(c in l for c in ["❌", "⚠️"])]
             reason = err_lines[-1][:120] if err_lines else "Checkout gagal"
@@ -1023,6 +1055,7 @@ class SiliwangiEngine:
     # ------------------------------------------------------------------
 
     async def _process_checkout(self):
+        checkout_post_started = False
         try:
             # 1) Verifikasi keranjang tidak kosong
             cart_res = await self._safe_request_with_recovery('GET', "https://siliwangibolukukus.com/cart/")
@@ -1090,6 +1123,7 @@ class SiliwangiEngine:
                     dynamic_shipping = val
                     logger.info(f"🚚 [{self.username}] Ditemukan shipping dinamis: {dynamic_shipping}")
                     break
+            self.shipping_method = dynamic_shipping
             base_payload['shipping_method[0]'] = dynamic_shipping
             base_payload['orddd_lite_current_hour']            = sekarang.strftime("%H")
             base_payload['orddd_lite_current_minute']          = sekarang.strftime("%M")
@@ -1106,11 +1140,13 @@ class SiliwangiEngine:
             base_payload['_wp_http_referer']                   = '/?wc-ajax=update_order_review'
 
             # 4) ✅ Panggil update_order_review sebelum checkout final (sesuai record)
-            await self._call_update_order_review(base_payload)
+            review_ok = await self._call_update_order_review(base_payload)
             self._step(
-                "✅" if self.security_nonce else "⚠️",
+                "✅" if review_ok else "⚠️",
                 "update_order_review",
-                "Berhasil" if self.security_nonce else "Dilewati (nonce tidak ada)"
+                "Berhasil" if review_ok
+                else "Dilewati (nonce tidak ada)" if not self.security_nonce
+                else "Gagal"
             )
 
             # 5) POST checkout final — hanya metode 'cheque' (sesuai record)
@@ -1120,15 +1156,20 @@ class SiliwangiEngine:
             ajax_headers = {"X-Requested-With": "XMLHttpRequest", "Accept": "application/json"}
             # Timeout lebih panjang untuk POST checkout (server bisa lambat saat war)
             try:
+                checkout_post_started = True
                 final_res = await asyncio.wait_for(
                     self._safe_request_with_recovery('POST', checkout_url, headers=ajax_headers, data=base_payload),
                     timeout=30.0
                 )
             except asyncio.TimeoutError:
                 logger.error(f"⏰ [{self.username}] Checkout POST timeout (30s)! Server tidak merespons.")
+                self._step("⚠️", "Checkout", "Timeout; status remote belum pasti")
+                await self._mark_unknown("Checkout POST timeout; status remote perlu diverifikasi")
                 return False
             if not final_res:
                 logger.error(f"💀 [{self.username}] Tidak ada respons dari server checkout.")
+                self._step("⚠️", "Checkout", "Tidak ada respons; status remote belum pasti")
+                await self._mark_unknown("Tidak ada respons checkout; status remote perlu diverifikasi")
                 return False
 
             # Cek sukses via JSON terlebih dahulu
@@ -1160,77 +1201,110 @@ class SiliwangiEngine:
                 m = re.search(r'/order-received/(\d+)/', str(final_res.url))
                 self.order_id_woo = m.group(1) if m else "UNKNOWN"
                 logger.warning(f"⚠️ Redirect history: {len(final_res.history)} redirects. Order ID: {self.order_id_woo}")
-                nominal = await self._scrape_order_nominal(self.order_id_woo)
-                await self._mark_success(nominal)
+                try:
+                    nominal = await self._scrape_order_nominal(self.order_id_woo)
+                    await self._mark_success(nominal)
+                except Exception as e:
+                    logger.warning(f"⚠️ Gagal finalisasi DB setelah redirect sukses: {e}")
                 return True
 
             # Cek sukses via teks HTML
             if "Pesanan" in final_res.text or "Order Complete" in final_res.text:
                 logger.info(f"🎉 [{self.username}] Checkout BERHASIL via HTML text!")
-                nominal = await self._scrape_order_nominal(
-                    getattr(self, 'order_id_woo', 'UNKNOWN')
-                )
-                await self._mark_success(nominal)
+                try:
+                    nominal = await self._scrape_order_nominal(
+                        getattr(self, 'order_id_woo', 'UNKNOWN')
+                    )
+                    await self._mark_success(nominal)
+                except Exception as e:
+                    logger.warning(f"⚠️ Gagal finalisasi DB setelah HTML sukses: {e}")
                 return True
 
-            logger.error(f"💀 [{self.username}] Checkout GAGAL. Response: {final_res.text[:200]}")
+            logger.error(f"💀 [{self.username}] Checkout tidak dikenali. Response: {final_res.text[:200]}")
             self._simpan_snapshot_html(final_res.text, "Checkout_GAGAL")
+            self._step("⚠️", "Checkout", "Respons tidak dikenali; status remote belum pasti")
+            await self._mark_unknown("Respons checkout tidak dikenali; status remote perlu diverifikasi")
             return False
 
         except Exception as e:
             logger.error(f"Fatal error checkout [{self.username}]: {e}", exc_info=True)
+            if checkout_post_started and not self._finalized_status:
+                await self._mark_unknown("Exception setelah checkout POST; status remote perlu diverifikasi")
             return False
 
     # ------------------------------------------------------------------
-    # MARK SUCCESS — hapus draft, simpan ke history
+    # MARK SUCCESS — finalisasi draft, simpan ke history
     # ------------------------------------------------------------------
 
     async def _mark_success(self, total_nominal: str = ''):
         """
-        Atomik: INSERT ke order_history (status=SUKSES) + DELETE dari draft_orders.
-        Jika salah satu gagal, keduanya di-rollback agar data konsisten.
+        Atomik via database.mark_order_success: INSERT riwayat + status SUCCESS.
+        Draft tidak dihapus agar attempt_id/status tetap bisa diaudit.
         """
-        conn = await aiosqlite.connect(DB_NAME, timeout=10)
-        cursor = await conn.cursor()
+        if not self.order_id:
+            logger.warning(f"⚠️ [{self.username}] _mark_success dipanggil sebelum draft di-claim.")
+            return
         try:
-            await cursor.execute(
-                "SELECT telegram_id, username, total_maxi, payload_json FROM draft_orders WHERE id=?",
-                (self.order_id,)
+            attempt_id = self._attempt_id or str(uuid.uuid4())
+            await mark_order_success(
+                draft_id=self.order_id,
+                telegram_id=self.telegram_id,
+                username=self.username,
+                attempt_id=attempt_id,
+                order_id=getattr(self, 'order_id_woo', 'UNKNOWN'),
+                total_nominal=total_nominal,
             )
-            row = await cursor.fetchone()
-            if row:
-                await cursor.execute('''
-                    INSERT INTO order_history
-                        (telegram_id, username, total_maxi, payload_json,
-                         order_id, status, total_nominal)
-                    VALUES (?, ?, ?, ?, ?, 'SUKSES', ?)
-                ''', (row[0], row[1], row[2], row[3],
-                      getattr(self, 'order_id_woo', 'UNKNOWN'), total_nominal))
-                logger.info(f"📚 [{self.username}] Riwayat SUKSES tersimpan. Nominal: {total_nominal}")
-            else:
-                logger.warning(
-                    f"⚠️ [{self.username}] Draft ID {self.order_id} tidak ditemukan saat _mark_success!"
-                )
-
-            await cursor.execute("DELETE FROM draft_orders WHERE id=?", (self.order_id,))
-            await conn.commit()
-            logger.info(f"✅ [{self.username}] Draft dihapus, riwayat tersimpan.")
+            self._finalized_status = "SUCCESS"
+            self._step("✅", "Finalisasi DB", "SUKSES")
+            logger.info(f"📚 [{self.username}] Riwayat SUKSES tersimpan. Nominal: {total_nominal}")
         except Exception as e:
-            await conn.rollback()
-            logger.error(f"❌ [{self.username}] _mark_success GAGAL, rollback: {e}", exc_info=True)
+            logger.error(f"❌ [{self.username}] _mark_success GAGAL: {e}", exc_info=True)
             raise
-        finally:
-            await conn.close()
 
     async def _mark_failed(self, reason: str):
-        """Ubah status draft menjadi FAILED dan catat alasan."""
+        """Ubah status draft menjadi FAILED, catat alasan ke DB, dan log step."""
+        # Guard: jika order_id belum di-set (gagal sebelum draft diambil), tidak perlu update DB
+        if not self.order_id:
+            self._step("❌", "GAGAL (pra-draft)", reason)
+            logger.error(f"❌ [{self.username}] Order GAGAL sebelum draft diambil: {reason}")
+            return
         try:
-            from database import mark_order_failed
-            await mark_order_failed(self.telegram_id, self.username)
+            attempt_id = self._attempt_id or str(uuid.uuid4())
+            marked = await mark_order_failed(
+                draft_id=self.order_id,
+                telegram_id=self.telegram_id,
+                username=self.username,
+                attempt_id=attempt_id,
+                reason=reason
+            )
+            if marked:
+                self._finalized_status = "FAILED"
             self._step("❌", "GAGAL", reason)
-            logger.error(f"❌ [{self.username}] Order GAGAL: {reason}. Status dikembalikan ke FAILED.")
+            logger.error(f"❌ [{self.username}] Order GAGAL: {reason}. Draft di-mark FAILED di DB.")
         except Exception as e:
-            logger.error(f"Error _mark_failed: {e}")
+            logger.error(f"❌ [{self.username}] Error saat _mark_failed: {e}", exc_info=True)
+
+    async def _mark_unknown(self, reason: str):
+        """Tandai hasil ambigu agar draft tidak otomatis di-retry dan tidak salah dicatat gagal."""
+        if not self.order_id:
+            self._step("⚠️", "UNKNOWN (pra-draft)", reason)
+            logger.error(f"⚠️ [{self.username}] Status UNKNOWN sebelum draft diambil: {reason}")
+            return
+        try:
+            attempt_id = self._attempt_id or str(uuid.uuid4())
+            marked = await mark_order_unknown(
+                draft_id=self.order_id,
+                telegram_id=self.telegram_id,
+                username=self.username,
+                attempt_id=attempt_id,
+                reason=reason
+            )
+            if marked:
+                self._finalized_status = "UNKNOWN"
+            self._step("⚠️", "UNKNOWN", reason)
+            logger.error(f"⚠️ [{self.username}] Order UNKNOWN: {reason}. Perlu verifikasi manual.")
+        except Exception as e:
+            logger.error(f"❌ [{self.username}] Error saat _mark_unknown: {e}", exc_info=True)
 
     async def _scrape_order_nominal(self, order_id_woo: str) -> str:
         """Scrape total nominal dari halaman order-received setelah checkout sukses."""

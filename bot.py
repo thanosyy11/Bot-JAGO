@@ -18,7 +18,8 @@ from database import (
     get_current_user, get_pending_order, delete_pending_order,
     get_all_accounts, set_active_account, get_all_pending_orders_multi,
     get_order_history, get_order_history_dates, get_order_history_by_date,
-    cleanup_all_pending_orders, init_db,
+    cleanup_all_pending_orders, expire_stale_pending_orders,
+    get_today_wib_date, init_db, recover_stale_running_orders,
     get_all_accounts_with_status, count_accounts, clear_session_cookies,
     get_all_drafts_overview, get_session_status,
     set_engine_ready_status, get_engine_ready_status,
@@ -33,8 +34,18 @@ logger = logging.getLogger(__name__)
 # Load .env explicitly from the same directory as this script
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
-BOT_TOKEN  = os.getenv("BOT_TOKEN")
-ADMIN_ID   = int(os.getenv("ADMIN_ID"))
+
+def _require_env(name: str) -> str:
+    value = os.getenv(name, "").strip()
+    if not value:
+        raise RuntimeError(f"{name} wajib diisi di file .env")
+    return value
+
+BOT_TOKEN = _require_env("BOT_TOKEN")
+try:
+    ADMIN_ID = int(_require_env("ADMIN_ID"))
+except ValueError as exc:
+    raise RuntimeError("ADMIN_ID di .env harus berupa angka Telegram ID.") from exc
 # Production mode only — dry run dihapus
 
 bot = Bot(token=BOT_TOKEN)
@@ -80,7 +91,17 @@ async def eksekusi_dengan_jeda(engine, delay, username):
         await asyncio.sleep(delay)
 
     logger.info(f"[WAR] akun: {username} (Delay: {delay:.1f}s)")
-    hasil = await engine.execute_order()
+    try:
+        hasil = await engine.execute_order()
+    except CloudflareBlockException:
+        raise
+    except Exception as e:
+        logger.error(f"[WAR] Crash saat eksekusi akun {username}: {e}", exc_info=True)
+        try:
+            engine._step("❌", "CRASH", f"{type(e).__name__}: {str(e)[:80]}")
+        except Exception:
+            pass
+        hasil = False
     return (
         username,
         hasil,
@@ -91,7 +112,11 @@ async def eksekusi_dengan_jeda(engine, delay, username):
 
 async def job_pemanasan():
     logger.info("Warm Up...")
-    orders = await get_all_pending_orders_multi(str(ADMIN_ID))
+    war_date = get_today_wib_date()
+    expired = await expire_stale_pending_orders(str(ADMIN_ID), war_date)
+    if expired:
+        logger.info(f"[Warm-up] {expired} draft lama dikarantina sebelum login.")
+    orders = await get_all_pending_orders_multi(str(ADMIN_ID), war_date)
 
     if not orders:
         await bot.send_message(
@@ -158,12 +183,16 @@ async def job_pemanasan():
 async def job_eksekusi():
     logger.info("🔥 WAKTUNYA WAR! Mengeksekusi order...")
     # RECOVERY STALE SESSIONS SEBELUM WAR
-    await recover_stale_running_orders()
+    await recover_stale_running_orders(str(ADMIN_ID))
+    war_date = get_today_wib_date()
+    expired = await expire_stale_pending_orders(str(ADMIN_ID), war_date)
+    if expired:
+        logger.info(f"[WAR] {expired} draft lama dikarantina sebelum eksekusi.")
     pasukan = mesin_siaga.get(ADMIN_ID, {})
 
     if not pasukan:
         logger.warning("⚠️ Memori kosong, memuat fallback dari database...")
-        orders = await get_all_pending_orders_multi(str(ADMIN_ID))
+        orders = await get_all_pending_orders_multi(str(ADMIN_ID), war_date)
         if orders:
             mesin_siaga[ADMIN_ID] = {}
             for order in orders:
@@ -229,7 +258,7 @@ async def job_eksekusi():
         # ─── Susun Laporan WAR ────────────────────────────────────────
         zona_wib = pytz.timezone('Asia/Jakarta')
         jam_war  = datetime.now(zona_wib).strftime("%H:%M")
-        laporan  = f" -**HASIL WAR {jam_war} WIB:**\n\n"
+        laporan  = f"🔥 **HASIL WAR {jam_war} WIB:**\n\n"
 
         for target_username, is_success, step_log, order_id_woo, substitusi_log in hasil_perang:
             if is_success:
@@ -323,16 +352,16 @@ async def job_bersihkan_draft():
     agar tidak terbawa ke war berikutnya.
     """
     logger.info("Memulai cleanup draft otomatis...")
-    await recover_stale_running_orders()
+    await recover_stale_running_orders(str(ADMIN_ID))
     deleted = await cleanup_all_pending_orders(str(ADMIN_ID))
     mesin_siaga.pop(ADMIN_ID, None)  # Bersihkan juga cache engine
 
     if deleted > 0:
         pesan = (
             f"🧹 CLEANUP Selesai!\n"
-            f"Dihapus **{deleted}** draft PENDING yang tersisa."
+            f"Dikarantina **{deleted}** draft PENDING yang tersisa."
         )
-        logger.info(f"🧹 Cleanup: {deleted} draft dihapus.")
+        logger.info(f"🧹 Cleanup: {deleted} draft dikarantina.")
     else:
         pesan = "🧹 CLEANUP Bersih! ✨"
         logger.info("🧹 Cleanup: Tidak ada draft tersisa.")
@@ -365,7 +394,7 @@ async def job_health_check():
         logger.warning(f"Health check Gagal: {e}")
 
     # 2. Cek session setiap akun yang punya draf
-    orders = await get_all_pending_orders_multi(str(ADMIN_ID))
+    orders = await get_all_pending_orders_multi(str(ADMIN_ID), get_today_wib_date())
     session_lines = []
     for order in orders:
         username = order[1]
@@ -1092,11 +1121,11 @@ async def cb_riwayat_checkout(callback: CallbackQuery):
         teks += "<i>(Tidak ada data untuk tanggal ini.)</i>"
     else:
         for jam, username, total_maxi, payload_json, order_id, status, total_nominal in rows:
-            status_icon = "✅" if status == "SUKSES" else "❌"
+            status_icon = "✅" if status == "SUKSES" else "⚠️" if status == "UNKNOWN" else "❌"
             teks += f"{status_icon} <b>{jam[:5]} WIB</b> — <code>{username[:28]}</code>\n"
             if order_id and order_id not in ('N/A', 'UNKNOWN'):
                 teks += f"   🔖 Order ID: <code>#{order_id}</code>\n"
-            if total_nominal:
+            if status == "SUKSES" and total_nominal:
                 teks += f"   💰 Total: <b>{total_nominal}</b>\n"
             teks += f"   📦 MAXI: <b>{total_maxi} box</b>\n"
             try:
@@ -1105,8 +1134,9 @@ async def cb_riwayat_checkout(callback: CallbackQuery):
                     teks += f"   {i}. {item['qty']}x {item['nama']}\n"
             except Exception:
                 teks += "   🛒 <i>(data tidak terbaca)</i>\n"
-            if status == "GAGAL" and total_nominal:
-                teks += f"   ⚠️ Alasan: <i>{total_nominal}</i>\n"
+            if status in {"GAGAL", "UNKNOWN"} and total_nominal:
+                label = "Perlu verifikasi" if status == "UNKNOWN" else "Alasan"
+                teks += f"   ⚠️ {label}: <i>{total_nominal}</i>\n"
             teks += "\n"
 
     btn = InlineKeyboardMarkup(inline_keyboard=[

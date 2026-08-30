@@ -539,15 +539,7 @@ async def mark_order_failed(
             return True
         if row[2] in {"SUCCESS", "UNKNOWN", "EXPIRED"}:
             return False
-        await cursor.execute(
-            """
-            INSERT INTO order_history
-                (telegram_id, username, total_maxi, payload_json,
-                 order_id, status, total_nominal, draft_id, attempt_id)
-            VALUES (?, ?, ?, ?, 'N/A', 'GAGAL', ?, ?, ?)
-            """,
-            (telegram_id, username, row[1], row[0], reason[:120], draft_id, attempt_id),
-        )
+        reason_short = reason[:120]
         await cursor.execute(
             """
             UPDATE draft_orders
@@ -555,10 +547,22 @@ async def mark_order_failed(
             WHERE id=? AND telegram_id=? AND username=?
               AND status IN ('RUNNING', 'PENDING')
             """,
-            (reason[:120], draft_id, telegram_id, username),
+            (reason_short, draft_id, telegram_id, username),
+        )
+        if cursor.rowcount != 1:
+            await conn.rollback()
+            return False
+        await cursor.execute(
+            """
+            INSERT INTO order_history
+                (telegram_id, username, total_maxi, payload_json,
+                 order_id, status, total_nominal, draft_id, attempt_id)
+            VALUES (?, ?, ?, ?, 'N/A', 'GAGAL', ?, ?, ?)
+            """,
+            (telegram_id, username, row[1], row[0], reason_short, draft_id, attempt_id),
         )
         await conn.commit()
-        return cursor.rowcount == 1
+        return True
     except Exception:
         await conn.rollback()
         raise
@@ -590,15 +594,7 @@ async def mark_order_unknown(
         if row[2] == "SUCCESS":
             await conn.commit()
             return True
-        await cursor.execute(
-            """
-            INSERT INTO order_history
-                (telegram_id, username, total_maxi, payload_json,
-                 order_id, status, total_nominal, draft_id, attempt_id)
-            VALUES (?, ?, ?, ?, 'UNKNOWN', 'UNKNOWN', ?, ?, ?)
-            """,
-            (telegram_id, username, row[1], row[0], reason[:120], draft_id, attempt_id),
-        )
+        reason_short = reason[:120]
         await cursor.execute(
             """
             UPDATE draft_orders
@@ -606,10 +602,22 @@ async def mark_order_unknown(
             WHERE id=? AND telegram_id=? AND username=?
               AND status IN ('RUNNING', 'PENDING')
             """,
-            (reason[:120], draft_id, telegram_id, username),
+            (reason_short, draft_id, telegram_id, username),
+        )
+        if cursor.rowcount != 1:
+            await conn.rollback()
+            return False
+        await cursor.execute(
+            """
+            INSERT INTO order_history
+                (telegram_id, username, total_maxi, payload_json,
+                 order_id, status, total_nominal, draft_id, attempt_id)
+            VALUES (?, ?, ?, ?, 'UNKNOWN', 'UNKNOWN', ?, ?, ?)
+            """,
+            (telegram_id, username, row[1], row[0], reason_short, draft_id, attempt_id),
         )
         await conn.commit()
-        return cursor.rowcount == 1
+        return True
     except Exception:
         await conn.rollback()
         raise
@@ -757,14 +765,11 @@ async def get_all_accounts_with_status(telegram_id: str) -> list:
         (telegram_id,)
     )
     rows = await cursor.fetchall()
-    # Cek session per akun
-    await cursor.execute(
-        "SELECT username FROM sessions WHERE telegram_id = ?",
-        (telegram_id,)
-    )
-    session_users = {r[0] for r in await cursor.fetchall()}
     await conn.close()
-    return [(u, is_active, u in session_users, nick) for u, is_active, nick in rows]
+    result = []
+    for u, is_active, nick in rows:
+        result.append((u, is_active, bool(await load_session_cookies(telegram_id, u)), nick))
+    return result
 
 async def count_accounts(telegram_id: str) -> int:
     """Hitung jumlah akun terdaftar."""
@@ -913,13 +918,13 @@ async def get_all_pending_orders_multi(telegram_id, war_date=None):
 
 async def cleanup_all_pending_orders(telegram_id):
     """
-    Cleanup jam 09:00: hapus draf yang dibuat SEBELUM jam 08:00 hari ini (WIB).
+    Cleanup jam 09:00: karantina draf PENDING untuk war yang sudah lewat.
     Aman: draf yang diinput setelah jam 08:00 (untuk besok) TIDAK dihapus.
     
     Timezone: Gunakan 'localtime' konsisten agar cleanup tepat waktu.
     """
-    today_war = datetime.now(WIB).date().isoformat()
-    deleted = await expire_stale_pending_orders(telegram_id, today_war)
+    next_war_date = get_current_war_date()
+    deleted = await expire_stale_pending_orders(telegram_id, next_war_date)
 
     conn = await aiosqlite.connect(DB_NAME, timeout=10)
     cursor = await conn.cursor()
